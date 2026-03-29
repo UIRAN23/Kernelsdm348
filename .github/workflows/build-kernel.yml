@@ -222,6 +222,8 @@ jobs:
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
+          
+          sed -i 's/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/\/\/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/g' kernel/trace/power-traces.c
 
           BUILD_START=$(date +"%s")
 
