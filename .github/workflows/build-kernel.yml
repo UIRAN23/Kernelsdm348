@@ -344,19 +344,10 @@ jobs:
 
           BUILD_START=$(date +"%s")
 
-          sed -i 's/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/\/\/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/g' kernel/trace/power-traces.c
-          
-          # Комментируем проблемную строку в KernelSU для старых ядер
-          if [ -f drivers/kernelsu/allowlist.c ]; then
-            sed -i 's/task_work_add(current, \&work->work, .*);/\/\/task_work_add(current, \&work->work, TWA_RESUME);/g' drivers/kernelsu/allowlist.c
-          fi
-
           # set +e чтобы поймать код возврата и показать ошибки
           set +e
           make -j$(nproc --all) \
             O=out ARCH=arm64 \
-            KCFLAGS="-Wno-error -Wno-pointer-arith -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types -Wno-shift-count-overflow -Wno-enum-conversion -Wno-return-type -Wno-constant-logical-operand -Wno-address-of-packed-member" \
-            KCPPFLAGS="-Wno-error" \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
