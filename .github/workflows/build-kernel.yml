@@ -222,14 +222,11 @@ jobs:
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
-          
-          sed -i 's/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/\/\/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/g' kernel/trace/power-traces.c
 
           BUILD_START=$(date +"%s")
 
           make -j$(nproc --all) \
             O=out ARCH=arm64 \
-            KCFLAGS="-Wno-error -Wno-pointer-arith -Wno-implicit-function-declaration" \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
