@@ -16,6 +16,7 @@ on:
 
 jobs:
   build:
+    # ubuntu-24.04: GLIBC 2.39 — требование Neutron Clang 18+ выполнено
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -44,66 +45,29 @@ jobs:
             lz4 zstd cpio kmod
 
       # ─────────────────────────────────────────────
-      # 3. Клонируем исходники ядра Mi-Thorium
+      # 3. Клонируем ядро
+      #
+      #    ПОЧЕМУ tavukkdoner, а не Mi-Thorium:
+      #    Mi-Thorium разбивает ядро на много репозиториев
+      #    (prima, techpack/audio, techpack/camera-legacy и т.д.)
+      #    и без них defconfig падает с "can't open file".
+      #    tavukkdoner/android_kernel_xiaomi_sdm439-4.19 (ветка uvite)
+      #    — монолитный форк, где всё уже внутри одного репо.
       # ─────────────────────────────────────────────
       - name: Clone kernel source
         run: |
           git clone --depth=1 \
-            -b mithorium/a13/master \
-            https://github.com/Mi-Thorium/kernel_msm-4.19 \
+            -b uvite \
+            https://github.com/tavukkdoner/android_kernel_xiaomi_sdm439-4.19 \
             kernel
-          echo "Kernel source cloned."
+          echo "Kernel cloned. Branch: uvite"
+          echo "techpack contents:"
+          ls kernel/techpack/ || echo "(no techpack dir)"
+          echo "drivers/staging contents:"
+          ls kernel/drivers/staging/ | grep -i prima || echo "(prima not found in staging)"
 
       # ─────────────────────────────────────────────
-      # 4. Клонируем внешние модули
-      #    Mi-Thorium держит ряд драйверов в отдельных репозиториях.
-      #    Их нужно положить в правильные места ДО запуска defconfig,
-      #    иначе Kconfig упадёт с "can't open file".
-      # ─────────────────────────────────────────────
-      - name: Clone external kernel modules
-        run: |
-          # ── prima (Qualcomm WiFi, SDM439/MSM8937) ──────────────────
-          # drivers/staging/Kconfig включает drivers/staging/prima/Kconfig
-          # без этого репо сразу падает "can't open file"
-          git clone --depth=1 \
-            -b wlan/LA.UM.9.6.4/mithorium/master \
-            https://github.com/Mi-Thorium/vendor_qcom_opensource_wlan_prima \
-            kernel/drivers/staging/prima
-          echo "prima cloned → kernel/drivers/staging/prima"
-
-          # ── DTS для SDM439 (olive / mi439) ─────────────────────────
-          # Devicetree source тоже отдельный репо
-          if git ls-remote --exit-code \
-              https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-sdm439 \
-              "dts/mi439/4.19/master" > /dev/null 2>&1; then
-            git clone --depth=1 \
-              -b dts/mi439/4.19/master \
-              https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-sdm439 \
-              kernel/arch/arm64/boot/dts/xiaomi-sdm439
-            echo "DTS sdm439 cloned"
-          else
-            echo "DTS sdm439 repo/branch not found — skipping (may already be in kernel)"
-          fi
-
-          # ── techpack (audio, camera) ────────────────────────────────
-          # Опциональные техпаки — не критично если отсутствуют
-          for SPEC in \
-            "https://github.com/Mi-Thorium/kernel_techpack_audio|audio/4.19/mithorium/master|kernel/techpack/audio" \
-            "https://github.com/Mi-Thorium/kernel_techpack_audio-legacy|audio/4.9/mithorium/master|kernel/techpack/audio-legacy"; do
-            URL=$(echo $SPEC | cut -d'|' -f1)
-            BRANCH=$(echo $SPEC | cut -d'|' -f2)
-            DEST=$(echo $SPEC | cut -d'|' -f3)
-            if git ls-remote --exit-code "$URL" "$BRANCH" > /dev/null 2>&1; then
-              git clone --depth=1 -b "$BRANCH" "$URL" "$DEST" && echo "Cloned $DEST" || true
-            else
-              echo "Skip $DEST (not found)"
-            fi
-          done
-
-      # ─────────────────────────────────────────────
-      # 5. Toolchain — Neutron Clang
-      #    ubuntu-24.04 имеет GLIBC 2.39 → совместим
-      #    ubuntu-22.04 имеет GLIBC 2.35 → НЕ совместим (была прошлая ошибка)
+      # 4. Toolchain — Neutron Clang
       # ─────────────────────────────────────────────
       - name: Download Neutron Clang
         run: |
@@ -125,7 +89,7 @@ jobs:
             CLANG_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/11012025/neutron-clang-11012025.tar.zst"
             echo "API fallback: $CLANG_URL"
           else
-            echo "Latest Neutron Clang: $CLANG_URL"
+            echo "Latest: $CLANG_URL"
           fi
 
           wget -q --show-progress "$CLANG_URL" -O neutron-clang.tar.zst
@@ -136,7 +100,7 @@ jobs:
           "$GITHUB_WORKSPACE/toolchain/bin/clang" --version
 
       # ─────────────────────────────────────────────
-      # 6. Применяем KernelSU Next
+      # 5. Применяем KernelSU Next
       # ─────────────────────────────────────────────
       - name: Apply KernelSU Next
         run: |
@@ -148,12 +112,12 @@ jobs:
 
           if [ -d "KernelSU" ]; then
             KSU_VER=$(grep ^KERNELSU_VERSION KernelSU/kernel/Makefile | cut -d= -f2 | tr -d ' ')
-            echo "KSU Next version: $KSU_VER"
+            echo "KSU Next: $KSU_VER"
             echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
           fi
 
       # ─────────────────────────────────────────────
-      # 7. Применяем SUSFS патчи
+      # 6. Применяем SUSFS патчи
       # ─────────────────────────────────────────────
       - name: Apply SUSFS patches
         run: |
@@ -161,12 +125,12 @@ jobs:
             https://github.com/KernelSU-Next/kernel_patches \
             ksu_patches
 
-          echo "=== Патчи в ksu_patches: ==="
+          echo "=== Доступные патчи ==="
           find ksu_patches -name "*.patch" | sort
 
           cd kernel
 
-          # Патч SUSFS для non-GKI 4.19
+          # Патч для ядра 4.19 (non-GKI)
           APPLIED=0
           for CANDIDATE in \
             "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch" \
@@ -175,17 +139,10 @@ jobs:
             "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel.patch"; do
             if [ -f "$CANDIDATE" ]; then
               echo "Applying: $CANDIDATE"
-              if patch -p1 --no-backup-if-mismatch --dry-run < "$CANDIDATE" 2>&1 | grep -q "FAILED"; then
-                echo "Dry-run failed, trying with --reject"
-                patch -p1 --no-backup-if-mismatch --reject-file=/dev/null < "$CANDIDATE" || true
-              else
-                patch -p1 --no-backup-if-mismatch < "$CANDIDATE"
-              fi
-              APPLIED=1
-              break
+              patch -p1 --no-backup-if-mismatch < "$CANDIDATE" && APPLIED=1 && break || true
             fi
           done
-          [ $APPLIED -eq 0 ] && echo "WARNING: no SUSFS kernel patch found"
+          [ $APPLIED -eq 0 ] && echo "WARNING: SUSFS kernel patch not found"
 
           # fs/ mount патч
           for CANDIDATE in \
@@ -193,7 +150,7 @@ jobs:
             "$GITHUB_WORKSPACE/ksu_patches/next/fs/susfs.patch" \
             "$GITHUB_WORKSPACE/ksu_patches/fs_susfs.patch"; do
             if [ -f "$CANDIDATE" ]; then
-              echo "Applying fs patch: $CANDIDATE"
+              echo "fs patch: $CANDIDATE"
               patch -p1 --no-backup-if-mismatch < "$CANDIDATE" || true
               break
             fi
@@ -202,7 +159,7 @@ jobs:
           echo "SUSFS done."
 
       # ─────────────────────────────────────────────
-      # 8. Конфигурируем ядро
+      # 7. Конфигурируем ядро
       # ─────────────────────────────────────────────
       - name: Configure kernel
         run: |
@@ -215,24 +172,30 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             LLVM=1 LLVM_IAS=1"
 
-          # Базовый defconfig для SDM439 (olive/mi439)
-          make $MAKE_FLAGS vendor/sdm439-perf_defconfig
-
-          # Конфигурационные фрагменты (из BoardConfigCommon.mk Mi-Thorium)
-          FRAGMENTS=""
-          for frag in \
-            arch/arm64/configs/vendor/common.config \
-            arch/arm64/configs/vendor/feature/android-12.config \
-            arch/arm64/configs/vendor/feature/exfat.config \
-            arch/arm64/configs/vendor/feature/kprobes.config \
-            arch/arm64/configs/vendor/feature/lmkd.config; do
-            [ -f "$frag" ] && FRAGMENTS="$FRAGMENTS $frag"
+          # Ищем правильный defconfig для olive/sdm439
+          DEFCONFIG=""
+          for CANDIDATE in \
+            vendor/sdm439-perf_defconfig \
+            vendor/olive_defconfig \
+            olive_defconfig \
+            sdm439-perf_defconfig; do
+            if [ -f "arch/arm64/configs/$CANDIDATE" ]; then
+              DEFCONFIG="$CANDIDATE"
+              echo "Found defconfig: $DEFCONFIG"
+              break
+            fi
           done
 
-          if [ -n "$FRAGMENTS" ]; then
-            echo "Merging fragments:$FRAGMENTS"
-            KCONFIG_CONFIG=out/.config scripts/kconfig/merge_config.sh -m out/.config $FRAGMENTS
+          if [ -z "$DEFCONFIG" ]; then
+            echo "=== Доступные defconfig-ы ==="
+            find arch/arm64/configs -name "*sdm439*" -o -name "*olive*" -o -name "*439*" | sort
+            # Если ничего не нашли — берём первый vendor
+            DEFCONFIG=$(ls arch/arm64/configs/vendor/ | grep -i "sdm\|perf\|qcom" | head -1)
+            DEFCONFIG="vendor/$DEFCONFIG"
+            echo "Fallback defconfig: $DEFCONFIG"
           fi
+
+          make $MAKE_FLAGS $DEFCONFIG
 
           # KSU + SUSFS опции
           scripts/config --file out/.config \
@@ -253,7 +216,7 @@ jobs:
           echo "Configuration done."
 
       # ─────────────────────────────────────────────
-      # 9. Сборка ядра
+      # 8. Сборка ядра
       # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
@@ -276,14 +239,14 @@ jobs:
           echo "Build time: $((DIFF / 60))m $((DIFF % 60))s"
 
           if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "=== ПОСЛЕДНИЕ 100 СТРОК ЛОГА: ==="
+            echo "=== ПОСЛЕДНИЕ 100 СТРОК ==="
             tail -100 build.log
             exit 1
           fi
           echo "Image.gz-dtb: OK"
 
       # ─────────────────────────────────────────────
-      # 10. Пакуем AnyKernel3
+      # 9. Пакуем AnyKernel3
       # ─────────────────────────────────────────────
       - name: Package with AnyKernel3
         run: |
@@ -302,7 +265,7 @@ jobs:
           ls -lh "$ZIP_NAME"
 
       # ─────────────────────────────────────────────
-      # 11. Upload артефакт
+      # 10. Upload артефакт
       # ─────────────────────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -312,7 +275,7 @@ jobs:
           retention-days: 30
 
       # ─────────────────────────────────────────────
-      # 12. GitHub Release
+      # 11. GitHub Release
       # ─────────────────────────────────────────────
       - name: Create GitHub Release
         if: ${{ github.event.inputs.upload_release == 'true' || github.event_name == 'push' }}
@@ -322,12 +285,12 @@ jobs:
           name: "Kernel Mi439/Olive — KSU Next + SUSFS (build #${{ github.run_number }})"
           body: |
             ## Ядро для Redmi 8 (olive / mi439)
-            - **Источник**: Mi-Thorium/kernel_msm-4.19 `mithorium/a13/master`
-            - **prima WiFi**: Mi-Thorium/vendor_qcom_opensource_wlan_prima
+            - **Источник**: tavukkdoner/android_kernel_xiaomi_sdm439-4.19 `uvite`
             - **KernelSU Next**: `${{ github.event.inputs.ksu_next_branch || 'next' }}`
             - **SUSFS**: включён
+            - **ROM**: EvolutionX 16.0 (совместима)
 
             ### Установка
             1. Прошей ZIP через TWRP
-            2. Установи APK KernelSU Next Manager
+            2. Установи APK KernelSU Next
           files: ${{ env.ZIP_NAME }}
