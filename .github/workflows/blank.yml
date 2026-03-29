@@ -156,18 +156,30 @@ jobs:
               ;;
           esac
 
-          # Версия KSU — считаем как в OnePlus workflow:
-          # git rev-list --count + 30700 (стандартная формула KSU)
-          if [ -d "KernelSU" ]; then
-            cd KernelSU
-            KSU_VERSION=$(expr $(git rev-list --count main 2>/dev/null \
-              || git rev-list --count HEAD 2>/dev/null \
-              || echo 13000) + 30700)
-            cd ..
-            echo "KSU версия: v$KSU_VERSION"
-          else
-            KSU_VERSION="unknown"
+          # Версия KSU через GitHub API — точный счёт коммитов,
+          # работает даже на shallow клоне (--depth=1).
+          # Формула: коммиты_на_main + 30700 (стандарт KSU)
+          KSU_COMMITS=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/ReSukiSU/ReSukiSU/commits?sha=main&per_page=1" \
+            -I 2>/dev/null \
+            | grep -i "^link:" \
+            | grep -oP 'page=\K\d+(?=>; rel="last")' || echo "")
+
+          if [ -z "$KSU_COMMITS" ]; then
+            # Фолбэк: считаем через git (если unshallow доступен)
+            if [ -d "KernelSU" ]; then
+              cd KernelSU
+              git fetch --unshallow 2>/dev/null || true
+              KSU_COMMITS=$(git rev-list --count HEAD 2>/dev/null || echo "4017")
+              cd ..
+            else
+              KSU_COMMITS="4017"
+            fi
           fi
+
+          KSU_VERSION=$((KSU_COMMITS + 30700))
+          echo "KSU коммитов: $KSU_COMMITS → версия: v$KSU_VERSION"
 
           echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
           echo "KSU_VARIANT=$VARIANT" >> $GITHUB_ENV
@@ -373,30 +385,45 @@ jobs:
           mkdir -p apk_out
 
           download_resukisu_apk() {
-            run_id=$(gh api \
-              "repos/ReSukiSU/ReSukiSU/actions/workflows/build-manager.yml/runs?branch=main&status=success&per_page=1" \
-              --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
+            # ReSukiSU не публикует Releases — только CI артефакты
+            # Ищем последний успешный ран build-manager.yml на ветке main
+            echo "Ищем последний CI ран ReSukiSU..."
+
+            run_id=$(curl -s \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/ReSukiSU/ReSukiSU/actions/workflows/build-manager.yml/runs?branch=main&status=success&per_page=1" \
+              | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          runs = data.get('workflow_runs', [])
+          print(runs[0]['id'] if runs else '')
+          " 2>/dev/null || echo "")
 
             [ -z "$run_id" ] && echo "ReSukiSU CI: нет успешных ранов" && return 1
+            echo "Run ID: $run_id"
 
-            artifact_url=$(gh api \
-              "repos/ReSukiSU/ReSukiSU/actions/runs/$run_id/artifacts" \
+            artifact_url=$(curl -s \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/ReSukiSU/ReSukiSU/actions/runs/$run_id/artifacts" \
               | python3 -c "
           import sys, json
           data = json.load(sys.stdin)
           for a in data.get('artifacts', []):
-              if 'Manager-release' in a.get('name', ''):
+              name = a.get('name', '')
+              if 'Manager-release' in name or 'manager' in name.lower():
                   print(a['archive_download_url']); break
           " 2>/dev/null || echo "")
 
-            [ -z "$artifact_url" ] && echo "Артефакт не найден" && return 1
+            [ -z "$artifact_url" ] && echo "Артефакт Manager не найден в ране $run_id" && return 1
 
+            echo "Скачиваем: $artifact_url"
             curl -fL -H "Authorization: token $GITHUB_TOKEN" \
               -o apk_out/manager.zip "$artifact_url"
+            unzip -j apk_out/manager.zip "*arm64-v8a*.apk" -d apk_out/ 2>/dev/null || \
             unzip -j apk_out/manager.zip "*.apk" -d apk_out/ 2>/dev/null || true
             rm -f apk_out/manager.zip
             APK=$(ls apk_out/*.apk 2>/dev/null | head -1)
-            [ -n "$APK" ] && echo "APK скачан: $APK" && return 0
+            [ -n "$APK" ] && echo "APK скачан: $(basename $APK)" && return 0
             return 1
           }
 
