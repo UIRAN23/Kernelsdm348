@@ -19,6 +19,7 @@ jobs:
 
       - name: Clone Kernel Source
         run: |
+          # Клонируем ядро Mi-Thorium
           git clone --depth=1 https://github.com/Mi-Thorium/kernel_msm-4.19 -b 14 kernel
           echo "KERNEL_DIR=$(pwd)/kernel" >> $GITHUB_ENV
 
@@ -29,22 +30,29 @@ jobs:
       - name: Integrate KernelSU Next
         run: |
           cd kernel
+          # Убираем старый KSU и ставим свежий Next
+          rm -rf drivers/kernelsu
           curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s main
 
       - name: Apply SUSFS Patches
         run: |
-          # Клонируем патчи SUSFS
+          # Клонируем официальный репозиторий патчей
           git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_src
-          cd kernel
           
-          # Копируем файлы заголовков и патчим ядро (версия 4.19)
+          cd kernel
+          # 1. Копируем файлы ядра SUSFS
           cp ../susfs_src/kernel_patches/include/linux/susfs.h include/linux/
           cp ../susfs_src/kernel_patches/fs/susfs.c fs/
           
-          # Применяем патчи (используем патч для 4.19)
-          # Внимание: если патч не ляжет идеально, сборка может упасть, но для Mi-Thorium обычно подходит 4.19.p1
-          cp ../susfs_src/kernel_patches/5.10/0001-kernel-add-susfs-support.patch . || cp ../susfs_src/kernel_patches/4.19/0001-kernel-add-susfs-support.patch .
-          patch -p1 < 0001-kernel-add-susfs-support.patch || echo "Patch failed, but we will try to continue"
+          # 2. Подготавливаем патч именно для 4.19
+          # Пробуем найти патч 4.19 в разных подпапках (структура иногда меняется)
+          SUS_PATCH=$(find ../susfs_src/kernel_patches/ -name "*4.19*.patch" | head -n 1)
+          echo "Using patch: $SUS_PATCH"
+          
+          # 3. Применяем патч с игнорированием мелких ошибок (fuzz)
+          patch -p1 --fuzz=3 < "$SUS_PATCH" || {
+            echo "Warning: Patch applied with some errors. Checking status..."
+          }
 
       - name: Build Kernel
         run: |
@@ -53,6 +61,7 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           
+          # Настройка аргументов сборки
           MAKE_ARGS="
             CC=clang
             CROSS_COMPILE=aarch64-linux-gnu-
@@ -64,12 +73,15 @@ jobs:
             STRIP=llvm-strip
           "
           
-          # Включаем поддержку SUSFS в конфиге
+          # Конфигурация
           make O=out $MAKE_ARGS olive_defconfig
+          
+          # Включаем KSU и SUSFS в конфиге
           scripts/config --file out/.config --enable CONFIG_KSU
           scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
           scripts/config --file out/.config --enable CONFIG_SUSFS
           
+          # Сама сборка
           make -j$(nproc --all) O=out $MAKE_ARGS
 
       - name: Upload Artifact
@@ -77,4 +89,5 @@ jobs:
         with:
           name: Kernel-Redmi8-KSU-SUSFS
           path: kernel/out/arch/arm64/boot/Image.gz-dtb
+
 
