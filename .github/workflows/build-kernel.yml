@@ -135,13 +135,27 @@ jobs:
             KSU_MK="KernelSU/kernel/Makefile"
           fi
 
-          if [ -f "$KSU_MK" ]; then
-            KSU_VER=$(grep "^KERNELSU_VERSION\|^KSU_VERSION" "$KSU_MK" | head -1 | cut -d= -f2 | tr -d ' ')
-            echo "KSU version: $KSU_VER"
-            echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
-          else
-            echo "KSU_VERSION=unknown" >> $GITHUB_ENV
+          # Ищем версию в разных местах (структура разная у KSU Next vs SukiSU)
+          KSU_VER=""
+          for MK_CANDIDATE in \
+            KernelSU/kernel/Makefile \
+            KernelSU/Makefile \
+            KernelSU-Next/kernel/Makefile \
+            SukiSU/kernel/Makefile; do
+            if [ -f "$MK_CANDIDATE" ]; then
+              KSU_VER=$(grep -E "^KERNELSU_VERSION|^KSU_VERSION|^VERSION" "$MK_CANDIDATE" \
+                | grep -v "^VERSION = " \
+                | head -1 | cut -d= -f2 | tr -d ' ')
+              [ -n "$KSU_VER" ] && echo "KSU version ($MK_CANDIDATE): $KSU_VER" && break
+            fi
+          done
+          # Крайний вариант — из git tag
+          if [ -z "$KSU_VER" ]; then
+            KSU_VER=$(cd KernelSU 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo "")
           fi
+          [ -z "$KSU_VER" ] && KSU_VER="latest"
+          echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
+          echo "Final KSU version: $KSU_VER"
 
           echo "KSU_VARIANT=$VARIANT" >> $GITHUB_ENV
 
@@ -262,27 +276,59 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             LLVM=1 LLVM_IAS=1"
 
-          # Ищем defconfig для SDM439/olive
+          # Показываем все конфиги для диагностики
+          echo "=== Все конфиги в arch/arm64/configs/ ==="
+          find arch/arm64/configs -maxdepth 3 | sort
+
+          # В форке tavukkdoner/uvite (Jprimero15) файл называется
+          # vendor/xiaomi-sdm439.config — полный конфиг (не фрагмент)
           DEFCONFIG=""
           for C in \
             vendor/sdm439-perf_defconfig \
             vendor/olive_defconfig \
+            vendor/xiaomi-sdm439.config \
+            vendor/xiaomi-sdm439_defconfig \
+            xiaomi-sdm439.config \
             olive_defconfig \
             sdm439-perf_defconfig \
             vendor/sdm439_defconfig; do
             if [ -f "arch/arm64/configs/$C" ]; then
-              DEFCONFIG="$C"; echo "defconfig: $DEFCONFIG"; break
+              DEFCONFIG="$C"
+              echo "defconfig найден: arch/arm64/configs/$DEFCONFIG"
+              break
             fi
           done
 
+          # Fallback: ищем по ключевым словам
           if [ -z "$DEFCONFIG" ]; then
-            echo "=== Доступные defconfig ==="
-            find arch/arm64/configs -name "*sdm*" -o -name "*439*" -o -name "*olive*" | sort
-            echo "ERROR: defconfig не найден!"
+            FOUND=$(find arch/arm64/configs -maxdepth 3 \
+              \( -name "*sdm439*" -o -name "*439*" -o -name "*olive*" \) \
+              | head -1)
+            if [ -n "$FOUND" ]; then
+              DEFCONFIG="${FOUND#arch/arm64/configs/}"
+              echo "Найден по ключевым словам: $DEFCONFIG"
+            fi
+          fi
+
+          if [ -z "$DEFCONFIG" ]; then
+            echo "ERROR: defconfig для SDM439 не найден!"
+            find arch/arm64/configs -maxdepth 3 | sort
             exit 1
           fi
 
-          make $MAKE_FLAGS $DEFCONFIG
+          # Если файл оканчивается на .config и содержит >100 строк CONFIG_
+          # — это полный конфиг, копируем напрямую (не как make target)
+          FULL_PATH="arch/arm64/configs/$DEFCONFIG"
+          if [[ "$DEFCONFIG" == *.config ]] && \
+             [ "$(grep -c "^CONFIG_" "$FULL_PATH" 2>/dev/null || echo 0)" -gt 100 ]; then
+            echo "Это полный .config — копируем напрямую в out/.config"
+            mkdir -p out
+            cp "$FULL_PATH" out/.config
+            make $MAKE_FLAGS olddefconfig
+          else
+            echo "Используем как make defconfig target"
+            make $MAKE_FLAGS $DEFCONFIG
+          fi
 
           # KSU опции
           scripts/config --file out/.config \
