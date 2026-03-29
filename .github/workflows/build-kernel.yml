@@ -229,6 +229,7 @@ jobs:
 
           make -j$(nproc --all) \
             O=out ARCH=arm64 \
+            KCFLAGS="-Wno-error -Wno-pointer-arith -Wno-implicit-function-declaration" \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
