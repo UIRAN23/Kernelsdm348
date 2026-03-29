@@ -1,4 +1,4 @@
-name: Build Kernel — Mi439/Olive (KSU Next / SukiSU Ultra + SUSFS)
+name: Build Kernel — Mi439/Olive (KSU Next / SukiSU Ultra / ReSukiSU + SUSFS)
 
 on:
   push:
@@ -11,10 +11,11 @@ on:
         default: 'ksu-next'
         type: choice
         options:
-          - ksu-next
-          - sukisu-ultra
+          - ksu-next        # KernelSU Next — стабильный
+          - sukisu-ultra    # SukiSU Ultra — фокус на скрытии
+          - resukisu        # ReSukiSU — поддержка старых ядер (4.x)
       enable_susfs:
-        description: 'Включить SUSFS (скрытие root)?'
+        description: 'Включить SUSFS?'
         required: true
         default: 'true'
         type: choice
@@ -23,7 +24,7 @@ on:
           - 'false'
       upload_release:
         description: 'Создать GitHub Release?'
-        required: false
+        required: true
         default: 'true'
         type: choice
         options:
@@ -32,7 +33,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04   # GLIBC 2.39 — нужен для Neutron Clang 18+
     permissions:
       contents: write
 
@@ -61,10 +62,8 @@ jobs:
 
       # ───────────────────────────────────────────────────────────
       # 3. Клонируем ядро
-      #    tavukkdoner/android_kernel_xiaomi_sdm439-4.19 (uvite)
-      #    — монолитный форк, все драйверы внутри одного репо.
-      #    Mi-Thorium/kernel_msm-4.19 не подходит — там
-      #    prima, techpack, camera и т.д. в отдельных репозиториях.
+      #    tavukkdoner/android_kernel_xiaomi_sdm439-4.19 ветка uvite
+      #    — монолитный форк Jprimero15, все драйверы в одном репо.
       # ───────────────────────────────────────────────────────────
       - name: Clone kernel source
         run: |
@@ -72,13 +71,12 @@ jobs:
             -b uvite \
             https://github.com/tavukkdoner/android_kernel_xiaomi_sdm439-4.19 \
             kernel
-          echo "=== Kernel cloned (uvite branch) ==="
-          echo "techpack:"; ls kernel/techpack/ 2>/dev/null || echo "(empty)"
-          echo "drivers/staging prima:"; ls kernel/drivers/staging/ | grep -i prima || echo "(no prima)"
+          echo "=== Kernel cloned (uvite) ==="
+          echo "Конфиги:"
+          find kernel/arch/arm64/configs -maxdepth 3 | sort
 
       # ───────────────────────────────────────────────────────────
       # 4. Toolchain — Neutron Clang
-      #    ubuntu-24.04: GLIBC 2.39 — совместим
       # ───────────────────────────────────────────────────────────
       - name: Download Neutron Clang
         run: |
@@ -96,11 +94,10 @@ jobs:
           ")
 
           if [ -z "$CLANG_URL" ]; then
-            # Проверенная версия на ubuntu-24.04
             CLANG_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/11012025/neutron-clang-11012025.tar.zst"
-            echo "API fallback: $CLANG_URL"
+            echo "API недоступен, фолбэк: $CLANG_URL"
           else
-            echo "Latest: $CLANG_URL"
+            echo "Скачиваем: $CLANG_URL"
           fi
 
           wget -q --show-progress "$CLANG_URL" -O neutron-clang.tar.zst
@@ -111,77 +108,86 @@ jobs:
           "$GITHUB_WORKSPACE/toolchain/bin/clang" --version
 
       # ───────────────────────────────────────────────────────────
-      # 5. Применяем KSU
+      # 5. Применяем KSU (вариант по выбору)
       # ───────────────────────────────────────────────────────────
       - name: Apply KernelSU variant
         run: |
           VARIANT="${{ github.event.inputs.ksu_variant || 'ksu-next' }}"
-          echo "KSU variant: $VARIANT"
+          echo "=== KSU вариант: $VARIANT ==="
           cd kernel
 
-          if [ "$VARIANT" = "sukisu-ultra" ]; then
-            echo "--- SukiSU Ultra ---"
-            curl -LSs \
-              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
-              | bash -s main
-            KSU_DIR="KernelSU"
-            KSU_MK="KernelSU/kernel/Makefile"
-          else
-            echo "--- KernelSU Next ---"
-            curl -LSs \
-              "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-              | bash -s next
-            KSU_DIR="KernelSU"
-            KSU_MK="KernelSU/kernel/Makefile"
-          fi
+          case "$VARIANT" in
+            sukisu-ultra)
+              curl -LSs \
+                "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+                | bash -s main
+              ;;
+            resukisu)
+              # ReSukiSU — форк с упором на старые ядра (4.x, 5.x non-GKI)
+              # Использует KernelSU API, но с более широкой совместимостью
+              curl -LSs \
+                "https://raw.githubusercontent.com/re-sukisu/re-sukisu/main/kernel/setup.sh" \
+                | bash -s main || \
+              # Фолбэк — официальная документация советует этот способ
+              curl -LSs \
+                "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" \
+                | bash -s "non-gki"
+              ;;
+            *)
+              # ksu-next (по умолчанию)
+              curl -LSs \
+                "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+                | bash -s next
+              ;;
+          esac
 
-          # Ищем версию в разных местах (структура разная у KSU Next vs SukiSU)
+          # Ищем версию KSU
           KSU_VER=""
-          for MK_CANDIDATE in \
+          for MK in \
             KernelSU/kernel/Makefile \
             KernelSU/Makefile \
-            KernelSU-Next/kernel/Makefile \
-            SukiSU/kernel/Makefile; do
-            if [ -f "$MK_CANDIDATE" ]; then
-              KSU_VER=$(grep -E "^KERNELSU_VERSION|^KSU_VERSION|^VERSION" "$MK_CANDIDATE" \
-                | grep -v "^VERSION = " \
+            KernelSU-Next/kernel/Makefile; do
+            if [ -f "$MK" ]; then
+              KSU_VER=$(grep -E "^KERNELSU_VERSION\s*=|^KSU_VERSION\s*=" "$MK" \
                 | head -1 | cut -d= -f2 | tr -d ' ')
-              [ -n "$KSU_VER" ] && echo "KSU version ($MK_CANDIDATE): $KSU_VER" && break
+              [ -n "$KSU_VER" ] && break
             fi
           done
-          # Крайний вариант — из git tag
-          if [ -z "$KSU_VER" ]; then
-            KSU_VER=$(cd KernelSU 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          # Крайний случай — из git tag
+          if [ -z "$KSU_VER" ] && [ -d "KernelSU" ]; then
+            KSU_VER=$(cd KernelSU && git describe --tags --abbrev=0 2>/dev/null || true)
           fi
           [ -z "$KSU_VER" ] && KSU_VER="latest"
-          echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
-          echo "Final KSU version: $KSU_VER"
 
+          echo "KSU версия: $KSU_VER"
+          echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
           echo "KSU_VARIANT=$VARIANT" >> $GITHUB_ENV
 
       # ───────────────────────────────────────────────────────────
-      # 6. Применяем SUSFS патчи (если включено)
+      # 6. SUSFS патчи (опционально)
       #
-      #    ВАЖНО: используем --dry-run перед применением.
-      #    Если dry-run провалился → патч НЕ применяем, флаг off.
-      #    Это предотвращает "broken code" от частичного патча.
+      #    Используем --dry-run ПЕРЕД применением.
+      #    Если dry-run провалился — патч НЕ применяется (не ломаем код).
       # ───────────────────────────────────────────────────────────
       - name: Apply SUSFS patches
         run: |
-          ENABLE_SUSFS="${{ github.event.inputs.enable_susfs || 'true' }}"
+          ENABLE="${{ github.event.inputs.enable_susfs || 'true' }}"
           VARIANT="${{ env.KSU_VARIANT }}"
-          echo "SUSFS enabled: $ENABLE_SUSFS"
 
-          if [ "$ENABLE_SUSFS" != "true" ]; then
+          if [ "$ENABLE" != "true" ]; then
             echo "SUSFS отключён пользователем."
             echo "SUSFS_APPLIED=false" >> $GITHUB_ENV
             exit 0
           fi
 
-          # Выбираем репо патчей в зависимости от варианта KSU
+          # Репозиторий патчей зависит от варианта KSU
           if [ "$VARIANT" = "sukisu-ultra" ]; then
             git clone --depth=1 \
               https://github.com/SukiSU-Ultra/SukiSU_patch \
+              ksu_patches || \
+            git clone --depth=1 \
+              https://github.com/KernelSU-Next/kernel_patches \
               ksu_patches
           else
             git clone --depth=1 \
@@ -189,81 +195,62 @@ jobs:
               ksu_patches
           fi
 
-          echo "=== Патчи: ==="
+          echo "=== Найденные патчи: ==="
           find ksu_patches -name "*.patch" | sort
 
           cd kernel
           SUSFS_APPLIED=false
 
-          # Список кандидатов по приоритету
-          PATCH_CANDIDATES=()
-          if [ "$VARIANT" = "sukisu-ultra" ]; then
-            PATCH_CANDIDATES=(
-              "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel-4.19.patch"
-              "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel.patch"
-              "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch"
-            )
-          else
-            PATCH_CANDIDATES=(
-              "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch"
-              "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel-4.19.patch"
-              "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel.patch"
-              "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel.patch"
-            )
-          fi
+          # Кандидаты на основной патч (от более специфичного к общему)
+          CANDIDATES=(
+            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch"
+            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel-4.19.patch"
+            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel.patch"
+            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel.patch"
+          )
 
-          for CANDIDATE in "${PATCH_CANDIDATES[@]}"; do
-            if [ -f "$CANDIDATE" ]; then
-              echo "Проверяем (dry-run): $CANDIDATE"
-              if patch -p1 --dry-run --no-backup-if-mismatch < "$CANDIDATE" 2>&1; then
-                echo "Dry-run OK, применяем..."
-                patch -p1 --no-backup-if-mismatch < "$CANDIDATE"
-                SUSFS_APPLIED=true
-                echo "SUSFS ядерный патч применён!"
-                break
-              else
-                echo "Dry-run FAILED для $CANDIDATE — пропускаем"
-              fi
+          for CANDIDATE in "${CANDIDATES[@]}"; do
+            [ ! -f "$CANDIDATE" ] && continue
+            echo "Dry-run: $CANDIDATE"
+            if patch -p1 --dry-run --no-backup-if-mismatch < "$CANDIDATE" > /dev/null 2>&1; then
+              patch -p1 --no-backup-if-mismatch < "$CANDIDATE"
+              SUSFS_APPLIED=true
+              echo "SUSFS патч применён!"
+              break
+            else
+              echo "Не совместим (dry-run failed) — пропускаем."
             fi
           done
 
           # fs/ mount hooks патч
-          FS_CANDIDATES=()
-          if [ "$VARIANT" = "sukisu-ultra" ]; then
-            FS_CANDIDATES=(
-              "$GITHUB_WORKSPACE/ksu_patches/fs_susfs.patch"
-              "$GITHUB_WORKSPACE/ksu_patches/next/fs_susfs.patch"
-            )
-          else
-            FS_CANDIDATES=(
-              "$GITHUB_WORKSPACE/ksu_patches/next/fs_susfs.patch"
-              "$GITHUB_WORKSPACE/ksu_patches/next/fs/susfs.patch"
-              "$GITHUB_WORKSPACE/ksu_patches/fs_susfs.patch"
-            )
-          fi
-
+          FS_CANDIDATES=(
+            "$GITHUB_WORKSPACE/ksu_patches/next/fs_susfs.patch"
+            "$GITHUB_WORKSPACE/ksu_patches/next/fs/susfs.patch"
+            "$GITHUB_WORKSPACE/ksu_patches/fs_susfs.patch"
+          )
           for CANDIDATE in "${FS_CANDIDATES[@]}"; do
-            if [ -f "$CANDIDATE" ]; then
-              echo "fs патч dry-run: $CANDIDATE"
-              if patch -p1 --dry-run --no-backup-if-mismatch < "$CANDIDATE" 2>&1; then
-                patch -p1 --no-backup-if-mismatch < "$CANDIDATE"
-                echo "fs патч применён!"
-                break
-              else
-                echo "fs патч FAILED dry-run — пропускаем"
-              fi
+            [ ! -f "$CANDIDATE" ] && continue
+            echo "fs dry-run: $CANDIDATE"
+            if patch -p1 --dry-run --no-backup-if-mismatch < "$CANDIDATE" > /dev/null 2>&1; then
+              patch -p1 --no-backup-if-mismatch < "$CANDIDATE"
+              echo "fs патч применён!"
+              break
             fi
           done
 
           echo "SUSFS_APPLIED=$SUSFS_APPLIED" >> $GITHUB_ENV
-
-          if [ "$SUSFS_APPLIED" = "false" ]; then
-            echo "⚠️  SUSFS патчи не совместимы с этим ядром."
-            echo "⚠️  Продолжаем без SUSFS."
-          fi
+          [ "$SUSFS_APPLIED" = "false" ] && \
+            echo "SUSFS патчи не совместимы с этим ядром — сборка продолжится без SUSFS."
 
       # ───────────────────────────────────────────────────────────
-      # 7. Конфигурируем
+      # 7. Конфигурируем ядро
+      #
+      #    SDM439 = MSM8937 семейство.
+      #    В uvite-форке:
+      #      vendor/msm8937-perf_defconfig  — базовый полный defconfig
+      #      vendor/xiaomi-sdm439.config    — фрагмент поверх (SDM439 tweaks)
+      #    Правильный порядок: сначала msm8937-perf_defconfig,
+      #    потом merge_config.sh с xiaomi-sdm439.config.
       # ───────────────────────────────────────────────────────────
       - name: Configure kernel
         run: |
@@ -276,70 +263,57 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             LLVM=1 LLVM_IAS=1"
 
-          # Показываем все конфиги для диагностики
-          echo "=== Все конфиги в arch/arm64/configs/ ==="
-          find arch/arm64/configs -maxdepth 3 | sort
-
-          # В форке tavukkdoner/uvite (Jprimero15) файл называется
-          # vendor/xiaomi-sdm439.config — полный конфиг (не фрагмент)
-          DEFCONFIG=""
+          # ── Шаг 1: базовый defconfig ──────────────────────────
+          # SDM439 = MSM8937 в Qualcomm нотации
+          BASE_DEFCONFIG=""
           for C in \
+            vendor/msm8937-perf_defconfig \
+            vendor/msm8937_defconfig \
             vendor/sdm439-perf_defconfig \
+            vendor/sdm439_defconfig \
             vendor/olive_defconfig \
-            vendor/xiaomi-sdm439.config \
-            vendor/xiaomi-sdm439_defconfig \
-            xiaomi-sdm439.config \
             olive_defconfig \
-            sdm439-perf_defconfig \
-            vendor/sdm439_defconfig; do
+            msm8937-perf_defconfig; do
             if [ -f "arch/arm64/configs/$C" ]; then
-              DEFCONFIG="$C"
-              echo "defconfig найден: arch/arm64/configs/$DEFCONFIG"
+              BASE_DEFCONFIG="$C"
+              echo "Базовый defconfig: $BASE_DEFCONFIG"
               break
             fi
           done
 
-          # Fallback: ищем по ключевым словам
-          if [ -z "$DEFCONFIG" ]; then
-            FOUND=$(find arch/arm64/configs -maxdepth 3 \
-              \( -name "*sdm439*" -o -name "*439*" -o -name "*olive*" \) \
-              | head -1)
-            if [ -n "$FOUND" ]; then
-              DEFCONFIG="${FOUND#arch/arm64/configs/}"
-              echo "Найден по ключевым словам: $DEFCONFIG"
-            fi
-          fi
-
-          if [ -z "$DEFCONFIG" ]; then
-            echo "ERROR: defconfig для SDM439 не найден!"
+          if [ -z "$BASE_DEFCONFIG" ]; then
+            echo "ERROR: базовый defconfig не найден!"
             find arch/arm64/configs -maxdepth 3 | sort
             exit 1
           fi
 
-          # Если файл оканчивается на .config и содержит >100 строк CONFIG_
-          # — это полный конфиг, копируем напрямую (не как make target)
-          FULL_PATH="arch/arm64/configs/$DEFCONFIG"
-          if [[ "$DEFCONFIG" == *.config ]] && \
-             [ "$(grep -c "^CONFIG_" "$FULL_PATH" 2>/dev/null || echo 0)" -gt 100 ]; then
-            echo "Это полный .config — копируем напрямую в out/.config"
-            mkdir -p out
-            cp "$FULL_PATH" out/.config
+          make $MAKE_FLAGS $BASE_DEFCONFIG
+
+          # ── Шаг 2: мерджим фрагмент xiaomi-sdm439.config ──────
+          FRAGMENT="arch/arm64/configs/vendor/xiaomi-sdm439.config"
+          if [ -f "$FRAGMENT" ]; then
+            echo "Мерджим фрагмент: $FRAGMENT"
+            ./scripts/kconfig/merge_config.sh \
+              -m out/.config \
+              "$FRAGMENT"
+            # merge_config.sh пишет .config в CWD — перемещаем в out/
+            [ -f .config ] && mv .config out/.config
             make $MAKE_FLAGS olddefconfig
+            echo "Фрагмент xiaomi-sdm439.config применён."
           else
-            echo "Используем как make defconfig target"
-            make $MAKE_FLAGS $DEFCONFIG
+            echo "Фрагмент xiaomi-sdm439.config не найден — используем только базовый конфиг."
           fi
 
-          # KSU опции
+          # ── Шаг 3: KSU опции ──────────────────────────────────
           scripts/config --file out/.config \
             -e KSU \
             -e KPROBES \
             -e HAVE_KPROBES \
             -e KPROBE_EVENTS
 
-          # SUSFS опции — только если патч реально применился
+          # ── Шаг 4: SUSFS опции (если патч применился) ─────────
           if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
-            echo "Включаем KSU_SUSFS опции в .config"
+            echo "Включаем SUSFS опции в .config"
             scripts/config --file out/.config \
               -e KSU_SUSFS \
               -e KSU_SUSFS_SUS_PATH \
@@ -351,17 +325,17 @@ jobs:
               -e KSU_SUSFS_ENABLE_LOG
           else
             echo "SUSFS не применён — отключаем в .config"
-            scripts/config --file out/.config \
-              -d KSU_SUSFS 2>/dev/null || true
+            scripts/config --file out/.config -d KSU_SUSFS 2>/dev/null || true
           fi
 
           make $MAKE_FLAGS olddefconfig
+
           echo "=== CONFIG CHECK ==="
-          grep -E "^CONFIG_KSU|^CONFIG_KPROBES|^CONFIG_KSU_SUSFS" out/.config || true
+          grep -E "^CONFIG_KSU|^CONFIG_KPROBES|^CONFIG_SUSFS" out/.config || true
           echo "Configuration done."
 
       # ───────────────────────────────────────────────────────────
-      # 8. Сборка
+      # 8. Сборка ядра
       # ───────────────────────────────────────────────────────────
       - name: Build kernel
         run: |
@@ -370,9 +344,7 @@ jobs:
 
           BUILD_START=$(date +"%s")
 
-          # Сборка с выводом реальных ошибок:
-          # - tee в build.log
-          # - при ошибке grep ищет строки с "error:" для диагностики
+          # set +e чтобы поймать код возврата и показать ошибки
           set +e
           make -j$(nproc --all) \
             O=out ARCH=arm64 \
@@ -387,24 +359,21 @@ jobs:
 
           BUILD_END=$(date +"%s")
           DIFF=$((BUILD_END - BUILD_START))
-          echo "Build time: $((DIFF / 60))m $((DIFF % 60))s"
+          echo "Время сборки: $((DIFF / 60))m $((DIFF % 60))s"
 
           if [ $BUILD_EXIT -ne 0 ]; then
             echo ""
-            echo "╔══════════════════════════════════════════════════╗"
-            echo "║            ОШИБКИ КОМПИЛЯЦИИ                    ║"
-            echo "╚══════════════════════════════════════════════════╝"
-            grep -n " error:" build.log | grep -v "^Binary" | head -40 || true
+            echo "════════════════════════════════════"
+            echo "     ОШИБКИ КОМПИЛЯЦИИ (error:)    "
+            echo "════════════════════════════════════"
+            grep -n " error:" build.log | grep -v "^Binary" | head -50 || true
             echo ""
-            echo "══ ПОСЛЕДНИЕ 50 СТРОК ЛОГА ══"
-            tail -50 build.log
+            echo "══ ПОСЛЕДНИЕ 60 СТРОК ЛОГА ══"
+            tail -60 build.log
             exit 1
           fi
 
-          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "ERROR: Image.gz-dtb не найден!"
-            exit 1
-          fi
+          ls -lh out/arch/arm64/boot/Image.gz-dtb
           echo "Image.gz-dtb: OK"
 
       # ───────────────────────────────────────────────────────────
@@ -417,16 +386,16 @@ jobs:
           cp kernel/out/arch/arm64/boot/Image.gz-dtb AK3/
 
           DATE=$(date +%Y%m%d)
-          VARIANT="${{ env.KSU_VARIANT }}"
-          VER="${{ env.KSU_VERSION }}"
           SUSFS_TAG=""
           [ "${{ env.SUSFS_APPLIED }}" = "true" ] && SUSFS_TAG="-SUSFS"
 
-          if [ "$VARIANT" = "sukisu-ultra" ]; then
-            ZIP_NAME="Kernel-Mi439-SukiSU_Ultra_${VER}${SUSFS_TAG}-${DATE}.zip"
-          else
-            ZIP_NAME="Kernel-Mi439-KSU_Next_${VER}${SUSFS_TAG}-${DATE}.zip"
-          fi
+          case "${{ env.KSU_VARIANT }}" in
+            sukisu-ultra) PREFIX="SukiSU_Ultra" ;;
+            resukisu)     PREFIX="ReSukiSU" ;;
+            *)            PREFIX="KSU_Next" ;;
+          esac
+
+          ZIP_NAME="Kernel-Mi439-${PREFIX}_${{ env.KSU_VERSION }}${SUSFS_TAG}-${DATE}.zip"
 
           cd AK3
           zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" . -x '*.git*'
@@ -453,21 +422,25 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: "Kernel Mi439/Olive — ${{ env.KSU_VARIANT }} ${{ env.KSU_VERSION }} (build #${{ github.run_number }})"
+          name: "Mi439/Olive — ${{ env.KSU_VARIANT }} ${{ env.KSU_VERSION }}${{ env.SUSFS_APPLIED == 'true' && '+SUSFS' || '' }} #${{ github.run_number }}"
           body: |
-            ## Ядро для Redmi 8 (olive / mi439)
+            ## Ядро для Redmi 8 / 8A / 8A Dual (olive / mi439)
 
             | Параметр | Значение |
             |---|---|
-            | Источник | tavukkdoner/android_kernel_xiaomi_sdm439-4.19 `uvite` |
+            | Источник ядра | `tavukkdoner/android_kernel_xiaomi_sdm439-4.19` ветка `uvite` |
             | KSU вариант | `${{ env.KSU_VARIANT }}` |
             | KSU версия | `${{ env.KSU_VERSION }}` |
-            | SUSFS | ${{ env.SUSFS_APPLIED == 'true' && '✅ включён' || '❌ не применён (патч несовместим)' }} |
-            | ROM | EvolutionX 16.0 / Android 16 |
+            | SUSFS | ${{ env.SUSFS_APPLIED == 'true' && '✅ включён' || '❌ выключен / несовместим' }} |
+            | Совместимые ROM | EvolutionX 16.0 (Android 16), другие 4.19-based |
 
             ### Установка
             1. Прошей ZIP через TWRP
-            2. Установи APK менеджера:
+            2. Установи APK KSU менеджера:
                - KSU Next: https://github.com/KernelSU-Next/KernelSU-Next/releases
                - SukiSU Ultra: https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases
+               - ReSukiSU: https://github.com/rsuntk/KernelSU/releases
+
+            ### Примечания
+            > Собрано автоматически через GitHub Actions. Не тестировалось!
           files: ${{ env.ZIP_NAME }}
