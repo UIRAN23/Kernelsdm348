@@ -1,0 +1,349 @@
+name: Build Kernel — Mi439/Olive
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_variant:
+        description: 'KSU вариант (resukisu лучше для 4.19)'
+        required: true
+        default: 'resukisu'
+        type: choice
+        options:
+          - resukisu        # ✅ Лучший для 4.19 non-GKI
+          - ksu-next        # ⚠️  Нужны патчи совместимости
+          - sukisu-ultra    # ⚠️  Нужны патчи совместимости
+      enable_susfs:
+        description: 'Включить SUSFS?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      upload_release:
+        description: 'Создать GitHub Release?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            git make bc bison flex \
+            libssl-dev libelf-dev \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            python3 zip unzip curl wget \
+            lz4 zstd cpio kmod
+
+      # ── Клонируем ядро ──────────────────────────────────────────
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 \
+            -b uvite \
+            https://github.com/tavukkdoner/android_kernel_xiaomi_sdm439-4.19 \
+            kernel
+          echo "Конфиги:"
+          find kernel/arch/arm64/configs -maxdepth 3 | sort
+
+      # ── Toolchain ───────────────────────────────────────────────
+      - name: Download Neutron Clang
+        run: |
+          mkdir -p toolchain
+          CLANG_URL=$(curl -s \
+            "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest" \
+            | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for a in data.get('assets', []):
+              url = a.get('browser_download_url', '')
+              if url.endswith('.tar.zst'):
+                  print(url); break
+          ")
+          [ -z "$CLANG_URL" ] && \
+            CLANG_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/11012025/neutron-clang-11012025.tar.zst"
+          echo "Clang: $CLANG_URL"
+          wget -q --show-progress "$CLANG_URL" -O neutron-clang.tar.zst
+          tar --use-compress-program=zstd -xf neutron-clang.tar.zst -C toolchain
+          rm neutron-clang.tar.zst
+          echo "CLANG_BIN=$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_ENV
+          "$GITHUB_WORKSPACE/toolchain/bin/clang" --version
+
+      # ── Применяем KSU ───────────────────────────────────────────
+      - name: Apply KernelSU
+        run: |
+          VARIANT="${{ github.event.inputs.ksu_variant }}"
+          echo "=== KSU: $VARIANT ==="
+          cd kernel
+
+          case "$VARIANT" in
+            resukisu)
+              # rsuntk/KernelSU ветка non-gki — специально для 4.x/5.x non-GKI
+              # Это и есть то что называют ReSukiSU / rsuntk KSU
+              curl -LSs \
+                "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" \
+                | bash -s "main"
+              ;;
+            sukisu-ultra)
+              curl -LSs \
+                "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+                | bash -s main
+              ;;
+            ksu-next)
+              curl -LSs \
+                "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+                | bash -s next
+              ;;
+          esac
+
+          # Версия
+          KSU_VER=""
+          for MK in KernelSU/kernel/Makefile KernelSU/Makefile; do
+            if [ -f "$MK" ]; then
+              KSU_VER=$(grep -E "^KERNELSU_VERSION\s*=" "$MK" | head -1 | cut -d= -f2 | tr -d ' ')
+              [ -n "$KSU_VER" ] && break
+            fi
+          done
+          if [ -z "$KSU_VER" ] && [ -d "KernelSU" ]; then
+            KSU_VER=$(cd KernelSU && git describe --tags --abbrev=0 2>/dev/null || true)
+          fi
+          [ -z "$KSU_VER" ] && KSU_VER="unknown"
+          echo "KSU версия: $KSU_VER"
+          echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
+          echo "KSU_VARIANT=$VARIANT" >> $GITHUB_ENV
+
+      # ── Патч совместимости KSU с 4.19 ──────────────────────────
+      # TWA_RESUME появился в 5.7, в 4.19 task_work_add принимает bool.
+      # put_task_struct требует <linux/sched/task.h>.
+      - name: Patch KSU for 4.19 compatibility
+        run: |
+          echo "=== Патч KSU для ядра 4.19 ==="
+          for F in kernel/drivers/kernelsu/*.c kernel/drivers/kernelsu/*.h; do
+            [ ! -f "$F" ] && continue
+            # TWA_RESUME → true
+            if grep -q "TWA_RESUME" "$F"; then
+              sed -i 's/TWA_RESUME/true/g' "$F"
+              echo "  TWA_RESUME→true: $F"
+            fi
+            # TWA_SIGNAL → false (иногда тоже встречается)
+            if grep -q "TWA_SIGNAL" "$F"; then
+              sed -i 's/TWA_SIGNAL/false/g' "$F"
+              echo "  TWA_SIGNAL→false: $F"
+            fi
+          done
+
+          # put_task_struct include
+          ALLOWLIST="kernel/drivers/kernelsu/allowlist.c"
+          if [ -f "$ALLOWLIST" ] && \
+             grep -q "put_task_struct" "$ALLOWLIST" && \
+             ! grep -q "sched/task.h" "$ALLOWLIST"; then
+            sed -i '1s|^|#include <linux/sched/task.h>\n|' "$ALLOWLIST"
+            echo "  Добавлен include sched/task.h в allowlist.c"
+          fi
+          echo "=== Патч завершён ==="
+
+      # ── SUSFS патчи ─────────────────────────────────────────────
+      - name: Apply SUSFS patches
+        run: |
+          ENABLE="${{ github.event.inputs.enable_susfs }}"
+          VARIANT="${{ env.KSU_VARIANT }}"
+
+          if [ "$ENABLE" != "true" ]; then
+            echo "SUSFS выключен."
+            echo "SUSFS_APPLIED=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          git clone --depth=1 \
+            https://github.com/KernelSU-Next/kernel_patches \
+            ksu_patches
+
+          echo "Патчи:"; find ksu_patches -name "*.patch" | sort
+
+          cd kernel
+          SUSFS_APPLIED=false
+
+          for CANDIDATE in \
+            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel-4.19.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel.patch"; do
+            [ ! -f "$CANDIDATE" ] && continue
+            echo "Dry-run: $CANDIDATE"
+            if patch -p1 --dry-run --no-backup-if-mismatch < "$CANDIDATE" > /dev/null 2>&1; then
+              patch -p1 --no-backup-if-mismatch < "$CANDIDATE"
+              SUSFS_APPLIED=true
+              echo "SUSFS патч OK!"
+              break
+            fi
+          done
+
+          for CANDIDATE in \
+            "$GITHUB_WORKSPACE/ksu_patches/next/fs_susfs.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/fs_susfs.patch"; do
+            [ ! -f "$CANDIDATE" ] && continue
+            if patch -p1 --dry-run --no-backup-if-mismatch < "$CANDIDATE" > /dev/null 2>&1; then
+              patch -p1 --no-backup-if-mismatch < "$CANDIDATE"
+              echo "fs патч OK!"
+              break
+            fi
+          done
+
+          echo "SUSFS_APPLIED=$SUSFS_APPLIED" >> $GITHUB_ENV
+          [ "$SUSFS_APPLIED" = "false" ] && \
+            echo "SUSFS патчи несовместимы — продолжаем без SUSFS."
+
+      # ── Конфигурация ────────────────────────────────────────────
+      # SDM439 = MSM8937 в нотации Qualcomm.
+      # Базовый конфиг: msm8937-perf_defconfig
+      # Фрагмент поверх: xiaomi-sdm439.config
+      - name: Configure kernel
+        run: |
+          export PATH="${{ env.CLANG_BIN }}:$PATH"
+          cd kernel
+
+          MAKE_FLAGS="O=out ARCH=arm64 CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1"
+
+          # Базовый defconfig
+          BASE=""
+          for C in \
+            vendor/msm8937-perf_defconfig \
+            vendor/msm8937_defconfig \
+            vendor/sdm439-perf_defconfig \
+            vendor/olive_defconfig; do
+            if [ -f "arch/arm64/configs/$C" ]; then
+              BASE="$C"; echo "Базовый defconfig: $BASE"; break
+            fi
+          done
+          [ -z "$BASE" ] && echo "ERROR: defconfig не найден!" && \
+            find arch/arm64/configs -maxdepth 3 | sort && exit 1
+
+          make $MAKE_FLAGS $BASE
+
+          # Мерджим xiaomi-sdm439.config поверх
+          FRAG="arch/arm64/configs/vendor/xiaomi-sdm439.config"
+          if [ -f "$FRAG" ]; then
+            echo "Мерджим: $FRAG"
+            ./scripts/kconfig/merge_config.sh -m out/.config "$FRAG"
+            [ -f .config ] && mv .config out/.config
+            make $MAKE_FLAGS olddefconfig
+          fi
+
+          # KSU
+          scripts/config --file out/.config \
+            -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
+
+          # SUSFS
+          if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
+            scripts/config --file out/.config \
+              -e KSU_SUSFS \
+              -e KSU_SUSFS_SUS_PATH \
+              -e KSU_SUSFS_SUS_MOUNT \
+              -e KSU_SUSFS_SUS_KSTAT \
+              -e KSU_SUSFS_SUS_OVERLAYFS \
+              -e KSU_SUSFS_TRY_UMOUNT \
+              -e KSU_SUSFS_SPOOFE_UNAME \
+              -e KSU_SUSFS_ENABLE_LOG
+          else
+            scripts/config --file out/.config -d KSU_SUSFS 2>/dev/null || true
+          fi
+
+          make $MAKE_FLAGS olddefconfig
+
+          echo "=== CONFIG CHECK ==="
+          grep -E "^CONFIG_KSU|^CONFIG_KPROBES" out/.config || true
+          echo "Configuration done."
+
+      # ── Сборка ──────────────────────────────────────────────────
+      - name: Build kernel
+        run: |
+          export PATH="${{ env.CLANG_BIN }}:$PATH"
+          cd kernel
+          BUILD_START=$(date +"%s")
+          set +e
+          make -j$(nproc --all) \
+            O=out ARCH=arm64 CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1 \
+            Image.gz-dtb 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          set -e
+          DIFF=$(( $(date +"%s") - BUILD_START ))
+          echo "Время: $((DIFF/60))m $((DIFF%60))s"
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "════ ОШИБКИ ════"
+            grep -n " error:" build.log | grep -v "^Binary" | head -50 || true
+            echo "════ ПОСЛЕДНИЕ 60 СТРОК ════"
+            tail -60 build.log
+            exit 1
+          fi
+          ls -lh out/arch/arm64/boot/Image.gz-dtb
+          echo "OK"
+
+      # ── AnyKernel3 ──────────────────────────────────────────────
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AK3
+          cp anykernel3/anykernel.sh AK3/anykernel.sh
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb AK3/
+          DATE=$(date +%Y%m%d)
+          SUSFS_TAG=""
+          [ "${{ env.SUSFS_APPLIED }}" = "true" ] && SUSFS_TAG="-SUSFS"
+          case "${{ env.KSU_VARIANT }}" in
+            sukisu-ultra) PFX="SukiSU_Ultra" ;;
+            resukisu)     PFX="ReSukiSU" ;;
+            *)            PFX="KSU_Next" ;;
+          esac
+          ZIP="Kernel-Mi439-${PFX}_${{ env.KSU_VERSION }}${SUSFS_TAG}-${DATE}.zip"
+          cd AK3 && zip -r9 "$GITHUB_WORKSPACE/$ZIP" . -x '*.git*' && cd ..
+          echo "ZIP_NAME=$ZIP" >> $GITHUB_ENV
+          ls -lh "$ZIP"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-mi439-olive
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: ${{ github.event.inputs.upload_release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Mi439/Olive — ${{ env.KSU_VARIANT }} ${{ env.KSU_VERSION }} #${{ github.run_number }}"
+          body: |
+            ## Ядро для Redmi 8 / 8A / 8A Dual (olive / mi439)
+
+            | | |
+            |---|---|
+            | Ядро | `tavukkdoner/android_kernel_xiaomi_sdm439-4.19` `uvite` |
+            | KSU | `${{ env.KSU_VARIANT }}` `${{ env.KSU_VERSION }}` |
+            | SUSFS | ${{ env.SUSFS_APPLIED == 'true' && '✅ включён' || '❌ выключен' }} |
+
+            ### Установка
+            1. Прошей ZIP через TWRP
+            2. Установи APK менеджера KSU
+          files: ${{ env.ZIP_NAME }}
