@@ -165,6 +165,55 @@ jobs:
           echo "KSU_VARIANT=$VARIANT" >> $GITHUB_ENV
 
       # ───────────────────────────────────────────────────────────
+      # 5.1. Патч совместимости KSU с ядром 4.19
+      #
+      #  KSU Next v3.x использует API из ядра 5.7+:
+      #  - TWA_RESUME (enum) → в 4.19 task_work_add принимает bool,
+      #    заменяем на true
+      #  - put_task_struct → нужен <linux/sched/task.h>, добавляем include
+      # ───────────────────────────────────────────────────────────
+      - name: Patch KSU for kernel 4.19 compatibility
+        run: |
+          ALLOWLIST="kernel/drivers/kernelsu/allowlist.c"
+
+          if [ ! -f "$ALLOWLIST" ]; then
+            echo "allowlist.c не найден — пропускаем патч (KSU не установлен?)"
+            exit 0
+          fi
+
+          echo "=== Патчим $ALLOWLIST для 4.19 ==="
+
+          # 1. TWA_RESUME → true
+          #    В 4.19: int task_work_add(struct task_struct *, struct callback_head *, bool notify)
+          #    В 5.7+: используется enum task_work_notify_mode { TWA_SIGNAL, TWA_RESUME, ... }
+          if grep -q "TWA_RESUME" "$ALLOWLIST"; then
+            sed -i 's/TWA_RESUME/true/g' "$ALLOWLIST"
+            echo "  ✅ TWA_RESUME → true"
+          else
+            echo "  ℹ️  TWA_RESUME не найден (уже совместим или другая версия KSU)"
+          fi
+
+          # 2. Добавляем missing include для put_task_struct
+          #    put_task_struct объявлен в <linux/sched/task.h>
+          if grep -q "put_task_struct" "$ALLOWLIST" &&              ! grep -q "linux/sched/task.h" "$ALLOWLIST"; then
+            sed -i '1s|^|#include <linux/sched/task.h>
+|' "$ALLOWLIST"
+            echo "  ✅ Добавлен #include <linux/sched/task.h>"
+          else
+            echo "  ℹ️  include уже есть или put_task_struct не используется"
+          fi
+
+          # 3. Аналогичная проверка других файлов KSU где могут быть те же проблемы
+          for F in kernel/drivers/kernelsu/*.c; do
+            if grep -q "TWA_RESUME" "$F" 2>/dev/null; then
+              sed -i 's/TWA_RESUME/true/g' "$F"
+              echo "  ✅ TWA_RESUME → true в $F"
+            fi
+          done
+
+          echo "=== Патч KSU 4.19 завершён ==="
+
+      # ───────────────────────────────────────────────────────────
       # 6. SUSFS патчи (опционально)
       #
       #    Используем --dry-run ПЕРЕД применением.
