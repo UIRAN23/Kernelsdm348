@@ -344,7 +344,12 @@ jobs:
 
           BUILD_START=$(date +"%s")
 
-          sed -i 's/task_work_add(current, &work->work, TWA_RESUME);/\/\/task_work_add(current, \&work->work, TWA_RESUME);/g' drivers/kernelsu/allowlist.c
+          sed -i 's/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/\/\/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/g' kernel/trace/power-traces.c
+          
+          # Комментируем проблемную строку в KernelSU для старых ядер
+          if [ -f drivers/kernelsu/allowlist.c ]; then
+            sed -i 's/task_work_add(current, \&work->work, .*);/\/\/task_work_add(current, \&work->work, TWA_RESUME);/g' drivers/kernelsu/allowlist.c
+          fi
 
           # set +e чтобы поймать код возврата и показать ошибки
           set +e
