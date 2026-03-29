@@ -344,10 +344,11 @@ jobs:
 
           BUILD_START=$(date +"%s")
 
+          sed -i 's/TWA_RESUME/TWA_SIGNAL/g' drivers/kernelsu/allowlist.c
+
           # set +e чтобы поймать код возврата и показать ошибки
           set +e
           make -j$(nproc --all) \
-            sed -i 's/TWA_RESUME/TWA_SIGNAL/g' drivers/kernelsu/allowlist.c
             O=out ARCH=arm64 \
             KCFLAGS="-Wno-error -Wno-pointer-arith -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types -Wno-shift-count-overflow -Wno-enum-conversion -Wno-return-type -Wno-constant-logical-operand -Wno-address-of-packed-member" \
             KCPPFLAGS="-Wno-error" \
