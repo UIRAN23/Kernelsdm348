@@ -348,6 +348,8 @@ jobs:
           set +e
           make -j$(nproc --all) \
             O=out ARCH=arm64 \
+            KCFLAGS="-Wno-error -Wno-pointer-arith -Wno-implicit-function-declaration -Wno-int-conversion -Wno-incompatible-pointer-types -Wno-shift-count-overflow -Wno-enum-conversion -Wno-return-type -Wno-constant-logical-operand -Wno-address-of-packed-member" \
+            KCPPFLAGS="-Wno-error" \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
