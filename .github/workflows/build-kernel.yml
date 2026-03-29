@@ -225,6 +225,8 @@ jobs:
           
           sed -i 's/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/\/\/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/g' kernel/trace/power-traces.c
 
+          sed -i 's/(void \*)/(char \*)/g' fs/susfs.c
+
           BUILD_START=$(date +"%s")
 
           make -j$(nproc --all) \
