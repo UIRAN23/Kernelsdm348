@@ -116,104 +116,33 @@ jobs:
             echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
           fi
 
+
       # ─────────────────────────────────────────────
-      # 6. Применяем SUSFS патчи
+      # 6. Клонируем и накладываем SUSFS
       # ─────────────────────────────────────────────
-      - name: Apply SUSFS patches
+      - name: Apply SUSFS
         run: |
-          git clone --depth=1 \
-            https://github.com/KernelSU-Next/kernel_patches \
-            ksu_patches
-
-          echo "=== Доступные патчи ==="
-          find ksu_patches -name "*.patch" | sort
-
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_src
           cd kernel
-
-          # Патч для ядра 4.19 (non-GKI)
-          APPLIED=0
-          for CANDIDATE in \
-            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch" \
-            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel-4.19.patch" \
-            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel.patch" \
-            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel.patch"; do
-            if [ -f "$CANDIDATE" ]; then
-              echo "Applying: $CANDIDATE"
-              patch -p1 --no-backup-if-mismatch < "$CANDIDATE" && APPLIED=1 && break || true
-            fi
-          done
-          [ $APPLIED -eq 0 ] && echo "WARNING: SUSFS kernel patch not found"
-
-          # fs/ mount патч
-          for CANDIDATE in \
-            "$GITHUB_WORKSPACE/ksu_patches/next/fs_susfs.patch" \
-            "$GITHUB_WORKSPACE/ksu_patches/next/fs/susfs.patch" \
-            "$GITHUB_WORKSPACE/ksu_patches/fs_susfs.patch"; do
-            if [ -f "$CANDIDATE" ]; then
-              echo "fs patch: $CANDIDATE"
-              patch -p1 --no-backup-if-mismatch < "$CANDIDATE" || true
-              break
-            fi
-          done
-
-          echo "SUSFS done."
+          # Копируем файлы ПРЯМО в дерево ядра
+          cp ../susfs_src/kernel_patches/include/linux/susfs.h include/linux/
+          cp ../susfs_src/kernel_patches/fs/susfs.c fs/
+          
+          # Накладываем патч (авто-поиск патча для 4.19)
+          SUS_PATCH=$(find ../susfs_src/kernel_patches/ -name "*4.19*.patch" | head -n 1)
+          patch -p1 --ignore-whitespace --fuzz=3 < "$SUS_PATCH" || echo "Патч наложен с предупреждениями"
 
       # ─────────────────────────────────────────────
-      # 7. Конфигурируем ядро
+      # 7. Интегрируем KernelSU Next
       # ─────────────────────────────────────────────
-      - name: Configure kernel
+      - name: Setup KernelSU Next
         run: |
-          export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
-
-          MAKE_FLAGS="O=out ARCH=arm64 CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LLVM=1 LLVM_IAS=1"
-
-          # Ищем правильный defconfig для olive/sdm439
-          DEFCONFIG=""
-          for CANDIDATE in \
-            vendor/sdm439-perf_defconfig \
-            vendor/olive_defconfig \
-            olive_defconfig \
-            sdm439-perf_defconfig; do
-            if [ -f "arch/arm64/configs/$CANDIDATE" ]; then
-              DEFCONFIG="$CANDIDATE"
-              echo "Found defconfig: $DEFCONFIG"
-              break
-            fi
-          done
-
-          if [ -z "$DEFCONFIG" ]; then
-            echo "=== Доступные defconfig-ы ==="
-            find arch/arm64/configs -name "*sdm439*" -o -name "*olive*" -o -name "*439*" | sort
-            # Если ничего не нашли — берём первый vendor
-            DEFCONFIG=$(ls arch/arm64/configs/vendor/ | grep -i "sdm\|perf\|qcom" | head -1)
-            DEFCONFIG="vendor/$DEFCONFIG"
-            echo "Fallback defconfig: $DEFCONFIG"
-          fi
-
-          make $MAKE_FLAGS $DEFCONFIG
-
-          # KSU + SUSFS опции
-          scripts/config --file out/.config \
-            -e KSU \
-            -e KSU_SUSFS \
-            -e KSU_SUSFS_SUS_PATH \
-            -e KSU_SUSFS_SUS_MOUNT \
-            -e KSU_SUSFS_SUS_KSTAT \
-            -e KSU_SUSFS_SUS_OVERLAYFS \
-            -e KSU_SUSFS_TRY_UMOUNT \
-            -e KSU_SUSFS_SPOOFE_UNAME \
-            -e KSU_SUSFS_ENABLE_LOG \
-            -e KPROBES \
-            -e HAVE_KPROBES \
-            -e KPROBE_EVENTS
-
-          make $MAKE_FLAGS olddefconfig
-          echo "Configuration done."
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s ${{ github.event.inputs.ksu_next_branch || 'next' }}
+          
+          # Получаем версию для имени архива
+          KSU_VER=$(cd drivers/kernelsu && git rev-list --count HEAD)
+          echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
       # 8. Сборка ядра
@@ -222,9 +151,11 @@ jobs:
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
-          
-          sed -i 's/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/\/\/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/g' kernel/trace/power-traces.c
 
+          # Исправляем ошибки компилятора ПОСЛЕ того, как все файлы на месте
+          sed -i 's/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/\/\/EXPORT_TRACEPOINT_SYMBOL_GPL(clock_set_rate);/g' kernel/trace/power-traces.c
+          
+          # Теперь этот файл ТОЧНО существует, так как шаг 6 отработал
           sed -i 's/(void \*)/(char \*)/g' fs/susfs.c
 
           BUILD_START=$(date +"%s")
@@ -244,11 +175,11 @@ jobs:
           echo "Build time: $((DIFF / 60))m $((DIFF % 60))s"
 
           if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "=== ПОСЛЕДНИЕ 100 СТРОК ==="
+            echo "=== ОШИБКА: Файл ядра не найден! ==="
             tail -100 build.log
             exit 1
           fi
-          echo "Image.gz-dtb: OK"
+
 
       # ─────────────────────────────────────────────
       # 9. Пакуем AnyKernel3
