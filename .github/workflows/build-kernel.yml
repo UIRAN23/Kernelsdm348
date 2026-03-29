@@ -16,20 +16,16 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04 имеет GLIBC 2.38 — требование Neutron Clang 18+
+    # ubuntu-22.04 имеет только GLIBC 2.35 → clang падал с ошибкой
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
     steps:
-      # ─────────────────────────────────────────────
-      # 1. Checkout этого репозитория (AnyKernel3 конфиг)
-      # ─────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ─────────────────────────────────────────────
-      # 2. Зависимости
-      # ─────────────────────────────────────────────
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
@@ -41,11 +37,8 @@ jobs:
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi \
             python3 zip unzip curl wget \
-            lz4 zstd
+            lz4 zstd cpio kmod
 
-      # ─────────────────────────────────────────────
-      # 3. Клонируем исходники ядра Mi-Thorium
-      # ─────────────────────────────────────────────
       - name: Clone kernel source
         run: |
           git clone --depth=1 \
@@ -54,112 +47,90 @@ jobs:
             kernel
           echo "Kernel cloned."
 
-      # ─────────────────────────────────────────────
-      # 4. Клонируем Device Tree (DTS отдельный репо)
-      # ─────────────────────────────────────────────
-      - name: Clone device tree
-        run: |
-          git clone --depth=1 \
-            https://github.com/Mi-Thorium/kernel_devicetree_msm-4.19 \
-            kernel_dt
-          # Копируем DTS файлы в исходники ядра
-          # (Mi-Thorium держит их в отдельном репо)
-          if [ -d kernel_dt/arch ]; then
-            cp -r kernel_dt/arch kernel/
-            echo "DTS merged from separate repo."
-          fi
-
-      # ─────────────────────────────────────────────
-      # 5. Toolchain — Neutron Clang 18
-      # ─────────────────────────────────────────────
       - name: Download Neutron Clang
         run: |
           mkdir -p toolchain
-          # Берём последний Neutron Clang 18
-          CLANG_URL=$(curl -s https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest \
-            | grep "browser_download_url" \
-            | grep "neutron-clang" \
-            | head -1 \
-            | cut -d '"' -f 4)
+
+          echo "Fetching Neutron Clang release info..."
+          RELEASE_JSON=$(curl -s \
+            "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest")
+
+          CLANG_URL=$(echo "$RELEASE_JSON" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for a in data.get('assets', []):
+              url = a.get('browser_download_url','')
+              if url.endswith('.tar.zst'):
+                  print(url)
+                  break
+          ")
 
           if [ -z "$CLANG_URL" ]; then
-            echo "Neutron Clang API failed, using fallback URL"
-            # Фолбэк: ставим Clang 18 из apt
-            sudo apt-get install -y clang-18 lld-18 llvm-18
-            ln -sf /usr/bin/clang-18 /usr/bin/clang
-            ln -sf /usr/bin/ld.lld-18 /usr/bin/ld.lld
-            echo "CLANG_BIN=/usr/bin" >> $GITHUB_ENV
-            echo "CLANG_INSTALLED=apt" >> $GITHUB_ENV
+            # Фолбэк на проверенную версию (требует GLIBC 2.38 — OK на ubuntu-24.04)
+            CLANG_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/11012025/neutron-clang-11012025.tar.zst"
+            echo "API fallback: $CLANG_URL"
           else
-            echo "Downloading Neutron Clang from $CLANG_URL"
-            wget -q "$CLANG_URL" -O neutron-clang.tar.zst
-            tar --use-compress-program=zstd -xf neutron-clang.tar.zst -C toolchain
-            rm neutron-clang.tar.zst
-            echo "CLANG_BIN=$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_ENV
-            echo "CLANG_INSTALLED=neutron" >> $GITHUB_ENV
+            echo "Latest: $CLANG_URL"
           fi
-          echo "Clang ready."
 
-      # ─────────────────────────────────────────────
-      # 6. Применяем KernelSU Next
-      # ─────────────────────────────────────────────
+          wget -q --show-progress "$CLANG_URL" -O neutron-clang.tar.zst
+          tar --use-compress-program=zstd -xf neutron-clang.tar.zst -C toolchain
+          rm neutron-clang.tar.zst
+
+          echo "CLANG_BIN=$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_ENV
+          "$GITHUB_WORKSPACE/toolchain/bin/clang" --version
+
       - name: Apply KernelSU Next
         run: |
           KSU_BRANCH="${{ github.event.inputs.ksu_next_branch || 'next' }}"
-          echo "Using KSU Next branch: $KSU_BRANCH"
           cd kernel
-          # Официальный способ установки KSU Next
           curl -LSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${KSU_BRANCH}/kernel/setup.sh" \
             | bash -s "${KSU_BRANCH}"
-          echo "KSU Next applied."
-          # Проверяем что KSU заинтегрирован
+
           if [ -d "KernelSU" ]; then
-            echo "KSU directory exists: OK"
-            echo "KSU version: $(cat KernelSU/kernel/Makefile | grep ^KERNELSU_VERSION | cut -d= -f2 | tr -d ' ')"
+            KSU_VER=$(grep ^KERNELSU_VERSION KernelSU/kernel/Makefile | cut -d= -f2 | tr -d ' ')
+            echo "KSU Next version: $KSU_VER"
+            echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
           fi
 
-      # ─────────────────────────────────────────────
-      # 7. Применяем SUSFS патчи
-      # ─────────────────────────────────────────────
       - name: Apply SUSFS patches
         run: |
-          # Клонируем патчи SUSFS для KSU Next
           git clone --depth=1 \
             https://github.com/KernelSU-Next/kernel_patches \
             ksu_patches
 
+          echo "Available patches:"
+          find ksu_patches -name "*.patch" | sort
+
           cd kernel
 
-          # Патч для ядра 4.19 (non-GKI)
-          # SUSFS основной патч
-          PATCH_419="$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch"
-          if [ -f "$PATCH_419" ]; then
-            echo "Applying SUSFS 4.19 patch..."
-            patch -p1 --no-backup-if-mismatch < "$PATCH_419" && echo "OK"
-          else
-            echo "Patch 4.19 not found in ksu_patches/next/, trying other paths..."
-            find "$GITHUB_WORKSPACE/ksu_patches" -name "*4.19*" -o -name "*susfs*" 2>/dev/null | head -20
-            # Попробуем общий патч
-            GENERIC_PATCH=$(find "$GITHUB_WORKSPACE/ksu_patches" -name "50_add_susfs_in_kernel*.patch" | head -1)
-            if [ -n "$GENERIC_PATCH" ]; then
-              echo "Trying: $GENERIC_PATCH"
-              patch -p1 --no-backup-if-mismatch < "$GENERIC_PATCH" || true
+          # Пробуем все возможные пути к патчу 4.19
+          for CANDIDATE in \
+            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel-4.19.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel.patch"; do
+            if [ -f "$CANDIDATE" ]; then
+              echo "Applying: $CANDIDATE"
+              patch -p1 --no-backup-if-mismatch < "$CANDIDATE" && echo "SUSFS patch OK" && break
             fi
-          fi
+          done
 
-          # Патч для fs/
-          FS_PATCH="$GITHUB_WORKSPACE/ksu_patches/next/fs/susfs.patch"
-          if [ -f "$FS_PATCH" ]; then
-            echo "Applying fs susfs patch..."
-            patch -p1 --no-backup-if-mismatch < "$FS_PATCH" || true
-          fi
+          # fs/ mount patch
+          for CANDIDATE in \
+            "$GITHUB_WORKSPACE/ksu_patches/next/fs_susfs.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/next/fs/susfs.patch" \
+            "$GITHUB_WORKSPACE/ksu_patches/fs_susfs.patch"; do
+            if [ -f "$CANDIDATE" ]; then
+              echo "Applying fs patch: $CANDIDATE"
+              patch -p1 --no-backup-if-mismatch < "$CANDIDATE" || true
+              break
+            fi
+          done
 
-          echo "SUSFS patches done."
+          echo "SUSFS done."
 
-      # ─────────────────────────────────────────────
-      # 8. Конфигурируем ядро
-      # ─────────────────────────────────────────────
       - name: Configure kernel
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
@@ -171,11 +142,9 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             LLVM=1 LLVM_IAS=1"
 
-          # Базовый defconfig для SDM439 (olive = sdm439)
           make $MAKE_FLAGS vendor/sdm439-perf_defconfig
 
-          # Применяем конфигурационные фрагменты Mi-Thorium
-          MERGE_SCRIPT="scripts/kconfig/merge_config.sh"
+          # Опциональные фрагменты Mi-Thorium
           FRAGMENTS=""
           for frag in \
             arch/arm64/configs/vendor/common.config \
@@ -187,11 +156,10 @@ jobs:
           done
 
           if [ -n "$FRAGMENTS" ]; then
-            echo "Merging fragments:$FRAGMENTS"
-            KCONFIG_CONFIG=out/.config $MERGE_SCRIPT -m out/.config $FRAGMENTS
+            echo "Merging:$FRAGMENTS"
+            KCONFIG_CONFIG=out/.config scripts/kconfig/merge_config.sh -m out/.config $FRAGMENTS
           fi
 
-          # Включаем KSU + SUSFS опции
           scripts/config --file out/.config \
             -e KSU \
             -e KSU_SUSFS \
@@ -209,73 +177,47 @@ jobs:
           make $MAKE_FLAGS olddefconfig
           echo "Configuration done."
 
-      # ─────────────────────────────────────────────
-      # 9. Сборка ядра
-      # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
 
           BUILD_START=$(date +"%s")
-
           make -j$(nproc --all) \
-            O=out \
-            ARCH=arm64 \
+            O=out ARCH=arm64 \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            Image.gz-dtb \
-            2>&1 | tee build.log
+            LLVM=1 LLVM_IAS=1 \
+            Image.gz-dtb 2>&1 | tee build.log
 
           BUILD_END=$(date +"%s")
           DIFF=$((BUILD_END - BUILD_START))
-          echo "Build took $((DIFF / 60)) min $((DIFF % 60)) sec"
+          echo "Build: $((DIFF / 60))m $((DIFF % 60))s"
 
-          # Проверяем артефакт
           if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "ERROR: Image.gz-dtb not found! Build failed."
-            tail -50 build.log
+            echo "ERROR: no Image.gz-dtb"
+            tail -80 build.log
             exit 1
           fi
-          echo "Image.gz-dtb built successfully."
+          echo "Image.gz-dtb OK"
 
-      # ─────────────────────────────────────────────
-      # 10. Пакуем AnyKernel3
-      # ─────────────────────────────────────────────
       - name: Package with AnyKernel3
         run: |
-          # Клонируем базовый AnyKernel3
-          git clone --depth=1 \
-            https://github.com/osm0sis/AnyKernel3 \
-            AK3
-
-          # Заменяем anykernel.sh нашим конфигом под olive
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AK3
           cp anykernel3/anykernel.sh AK3/anykernel.sh
-
-          # Копируем ядро
           cp kernel/out/arch/arm64/boot/Image.gz-dtb AK3/
 
-          # Имя зипа с датой и версией KSU
           DATE=$(date +%Y%m%d)
-          KSU_VER=$(cat kernel/KernelSU/kernel/Makefile 2>/dev/null \
-            | grep ^KERNELSU_VERSION | cut -d= -f2 | tr -d ' ' || echo "unknown")
-          ZIP_NAME="Kernel-Mi439-Olive-KSU_Next_${KSU_VER}-SUSFS-${DATE}.zip"
-
+          ZIP_NAME="Kernel-Mi439-Olive-KSU_Next_${{ env.KSU_VERSION }}-SUSFS-${DATE}.zip"
           cd AK3
-          zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" . -x '*.git*' -x '*.github*'
+          zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" . -x '*.git*'
           cd ..
 
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          echo "Packaged: $ZIP_NAME"
           ls -lh "$ZIP_NAME"
 
-      # ─────────────────────────────────────────────
-      # 11. Загружаем как артефакт
-      # ─────────────────────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -283,9 +225,6 @@ jobs:
           path: ${{ env.ZIP_NAME }}
           retention-days: 30
 
-      # ─────────────────────────────────────────────
-      # 12. Создаём GitHub Release (опционально)
-      # ─────────────────────────────────────────────
       - name: Create GitHub Release
         if: ${{ github.event.inputs.upload_release == 'true' || github.event_name == 'push' }}
         uses: softprops/action-gh-release@v2
@@ -294,20 +233,11 @@ jobs:
           name: "Kernel Mi439/Olive — KSU Next + SUSFS (build #${{ github.run_number }})"
           body: |
             ## Ядро для Redmi 8 (olive / mi439)
-
             - **Источник**: Mi-Thorium/kernel_msm-4.19 `mithorium/a13/master`
             - **KernelSU Next**: branch `${{ github.event.inputs.ksu_next_branch || 'next' }}`
             - **SUSFS**: включён
-            - **ROM**: EvolutionX 16.0 (Android 16) / совместимые 4.19 прошивки
-            - **Дата**: ${{ github.run_number }}
 
             ### Установка
-            1. Скачай ZIP
-            2. Прошей через TWRP / ADB sideload
-            3. Установи APK KernelSU Next Manager
-            4. Готово
-
-            > ⚠️ Сделано **без тестирования**, прошивай на свой риск.
+            1. Прошей ZIP через TWRP
+            2. Установи APK KernelSU Next
           files: ${{ env.ZIP_NAME }}
-          draft: false
-          prerelease: false
