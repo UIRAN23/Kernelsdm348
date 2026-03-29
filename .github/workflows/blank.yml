@@ -1,0 +1,80 @@
+name: Build Kernel (Redmi 8) - KSU Next + SUSFS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build by Vladimir
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Up Environment
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison build-essential flex libssl-dev libelf-dev clang lld llvm
+          sudo apt install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=1 https://github.com/Mi-Thorium/kernel_msm-4.19 -b 14 kernel
+          echo "KERNEL_DIR=$(pwd)/kernel" >> $GITHUB_ENV
+
+      - name: Clone Toolchain (Clang)
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+
+      - name: Integrate KernelSU Next
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s main
+
+      - name: Apply SUSFS Patches
+        run: |
+          # Клонируем патчи SUSFS
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_src
+          cd kernel
+          
+          # Копируем файлы заголовков и патчим ядро (версия 4.19)
+          cp ../susfs_src/kernel_patches/include/linux/susfs.h include/linux/
+          cp ../susfs_src/kernel_patches/fs/susfs.c fs/
+          
+          # Применяем патчи (используем патч для 4.19)
+          # Внимание: если патч не ляжет идеально, сборка может упасть, но для Mi-Thorium обычно подходит 4.19.p1
+          cp ../susfs_src/kernel_patches/5.10/0001-kernel-add-susfs-support.patch . || cp ../susfs_src/kernel_patches/4.19/0001-kernel-add-susfs-support.patch .
+          patch -p1 < 0001-kernel-add-susfs-support.patch || echo "Patch failed, but we will try to continue"
+
+      - name: Build Kernel
+        run: |
+          cd kernel
+          export PATH=$(pwd)/../clang/bin:$PATH
+          export ARCH=arm64
+          export SUBARCH=arm64
+          
+          MAKE_ARGS="
+            CC=clang
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+          "
+          
+          # Включаем поддержку SUSFS в конфиге
+          make O=out $MAKE_ARGS olive_defconfig
+          scripts/config --file out/.config --enable CONFIG_KSU
+          scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
+          scripts/config --file out/.config --enable CONFIG_SUSFS
+          
+          make -j$(nproc --all) O=out $MAKE_ARGS
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-Redmi8-KSU-SUSFS
+          path: kernel/out/arch/arm64/boot/Image.gz-dtb
+
