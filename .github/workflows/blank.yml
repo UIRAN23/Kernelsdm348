@@ -343,8 +343,17 @@ jobs:
             make $MAKE_FLAGS CC="$KERN_CC" olddefconfig
           fi
 
+          # KSU + Manual hooks для Non-GKI 4.19
+          # TP (tracepoint) hooks работают ТОЛЬКО на GKI 5.10+
+          # Для 4.19 нужны Manual VFS hooks → KSU_MANUAL_HOOK=y
+          # KSU_WITH_KPROBES=n отключает TP hooks явно
           scripts/config --file out/.config \
-            -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
+            -e KSU \
+            -e KSU_MANUAL_HOOK \
+            -d KSU_WITH_KPROBES \
+            -e KPROBES \
+            -e HAVE_KPROBES \
+            -e KPROBE_EVENTS
 
           if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
             scripts/config --file out/.config \
