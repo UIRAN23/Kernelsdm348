@@ -300,23 +300,27 @@ jobs:
             echo "SUSFS патчи несовместимы — продолжаем без SUSFS."
 
       # ── Конфигурация ────────────────────────────────────────────
+
+      # ── Конфигурация ────────────────────────────────────────────
       - name: Configure kernel
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
 
-          MAKE_FLAGS="O=out ARCH=arm64 CC=clang \
+          # CC передаётся отдельно — НЕ внутри MAKE_FLAGS строки
+          # (иначе будет "Unterminated quoted string" в sh)
+          if [ "${{ github.event.inputs.use_ccache }}" = "true" ]; then
+            KERN_CC="ccache clang"
+          else
+            KERN_CC="clang"
+          fi
+
+          MAKE_FLAGS="O=out ARCH=arm64 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             LLVM=1 LLVM_IAS=1"
 
-          # Оборачиваем CC в ccache если включён
-          if [ "${{ github.event.inputs.use_ccache }}" = "true" ]; then
-            MAKE_FLAGS="$MAKE_FLAGS CC='ccache clang'"
-          fi
-
-          # Базовый defconfig (SDM439 = MSM8937)
           BASE=""
           for C in \
             vendor/msm8937-perf_defconfig \
@@ -324,44 +328,35 @@ jobs:
             vendor/sdm439-perf_defconfig \
             vendor/olive_defconfig; do
             if [ -f "arch/arm64/configs/$C" ]; then
-              BASE="$C"; echo "Базовый defconfig: $BASE"; break
+              BASE="$C"; echo "defconfig: $BASE"; break
             fi
           done
-          [ -z "$BASE" ] && \
-            echo "ERROR: defconfig не найден!" && \
+          [ -z "$BASE" ] && echo "ERROR: defconfig не найден!" && \
             find arch/arm64/configs -maxdepth 3 | sort && exit 1
 
-          make $MAKE_FLAGS $BASE
+          make $MAKE_FLAGS CC="$KERN_CC" $BASE
 
-          # Мерджим фрагмент xiaomi-sdm439.config
           FRAG="arch/arm64/configs/vendor/xiaomi-sdm439.config"
           if [ -f "$FRAG" ]; then
-            echo "Мерджим: $FRAG"
             ./scripts/kconfig/merge_config.sh -m out/.config "$FRAG"
             [ -f .config ] && mv .config out/.config
-            make $MAKE_FLAGS olddefconfig
+            make $MAKE_FLAGS CC="$KERN_CC" olddefconfig
           fi
 
-          # KSU опции
           scripts/config --file out/.config \
             -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
 
-          # SUSFS опции
           if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
             scripts/config --file out/.config \
-              -e KSU_SUSFS \
-              -e KSU_SUSFS_SUS_PATH \
-              -e KSU_SUSFS_SUS_MOUNT \
-              -e KSU_SUSFS_SUS_KSTAT \
-              -e KSU_SUSFS_SUS_OVERLAYFS \
-              -e KSU_SUSFS_TRY_UMOUNT \
-              -e KSU_SUSFS_SPOOFE_UNAME \
+              -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
+              -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS \
+              -e KSU_SUSFS_TRY_UMOUNT -e KSU_SUSFS_SPOOFE_UNAME \
               -e KSU_SUSFS_ENABLE_LOG
           else
             scripts/config --file out/.config -d KSU_SUSFS 2>/dev/null || true
           fi
 
-          make $MAKE_FLAGS olddefconfig
+          make $MAKE_FLAGS CC="$KERN_CC" olddefconfig
 
           echo "=== CONFIG CHECK ==="
           grep -E "^CONFIG_KSU|^CONFIG_KPROBES" out/.config || true
@@ -374,17 +369,17 @@ jobs:
           cd kernel
           BUILD_START=$(date +"%s")
 
-          # Используем ccache через CC если включён
+          # CC для сборки
           if [ "${{ github.event.inputs.use_ccache }}" = "true" ]; then
-            CC_ARG="CC=ccache clang"
+            KERN_CC="ccache clang"
           else
-            CC_ARG="CC=clang"
+            KERN_CC="clang"
           fi
 
           set +e
           make -j$(nproc --all) \
             O=out ARCH=arm64 \
-            $CC_ARG \
+            CC="$KERN_CC" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
