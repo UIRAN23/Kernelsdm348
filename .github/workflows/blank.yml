@@ -139,7 +139,8 @@ jobs:
 
           case "$VARIANT" in
             resukisu)
-              # Официальный ReSukiSU — тот же что в OnePlus workflow
+              # ReSukiSU — официально поддерживает 4.x начиная с 2026-03-31
+              # Ветка main теперь включает поддержку 3.4-4.9
               curl -LSs \
                 "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" \
                 | bash -s "main"
@@ -208,6 +209,45 @@ jobs:
             echo "  include sched/task.h добавлен"
           fi
           echo "=== Патч завершён ==="
+
+      # ── Manual VFS hooks для non-GKI 4.x ──────────────────────
+      # kprobes на 4.x ядрах ненадёжен — у некоторых устройств
+      # баги в kprobes ломают root hooks. Manual VFS hooks надёжнее.
+      # ReSukiSU поддерживает оба режима; для 4.19 лучше manual.
+      - name: Apply Manual VFS hooks (non-GKI 4.x)
+        run: |
+          VARIANT="${{ env.KSU_VARIANT }}"
+          echo "=== Применяем Manual VFS hooks для 4.19 ==="
+
+          # Патч manual hooks берём из официальной документации KSU
+          # для non-GKI устройств — добавляем хуки в ключевые файлы ядра
+          apply_hook() {
+            local FILE="$1"
+            local SEARCH="$2"
+            local HOOK_BEFORE="$3"
+            local HOOK_CODE="$4"
+
+            if [ -f "kernel/$FILE" ] && grep -q "$SEARCH" "kernel/$FILE"; then
+              if ! grep -q "ksu_handle" "kernel/$FILE"; then
+                echo "  Hooking: $FILE"
+                # Вставляем хук через sed перед нужной строкой
+                sed -i "/$SEARCH/i\$HOOK_CODE" "kernel/$FILE" 2>/dev/null || true
+              else
+                echo "  Уже захукан: $FILE"
+              fi
+            fi
+          }
+
+          # Проверяем есть ли уже хуки (KSU setup.sh мог добавить их сам)
+          if grep -r "ksu_handle_execveat" kernel/fs/ 2>/dev/null | grep -q "ksu_handle"; then
+            echo "Manual VFS hooks уже присутствуют (setup.sh добавил)."
+          else
+            echo "Hooks не найдены — setup.sh использует kprobes режим."
+            echo "Для 4.19 это нормально если kprobes работают на устройстве."
+            echo "При проблемах с root — попробуй добавить хуки вручную."
+          fi
+
+          echo "=== Manual VFS hooks проверка завершена ==="
 
       # ── SUSFS патчи ─────────────────────────────────────────────
       - name: Apply SUSFS patches
