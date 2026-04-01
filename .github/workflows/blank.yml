@@ -302,6 +302,96 @@ jobs:
       # ── Конфигурация ────────────────────────────────────────────
 
       # ── Конфигурация ────────────────────────────────────────────
+      # ── Manual VFS hooks для Non-GKI 4.19 ──────────────────────
+      # ReSukiSU с KSU_MANUAL_HOOK требует добавить хуки в исходники ядра.
+      # setup.sh сам это НЕ делает для non-GKI — добавляем скриптом.
+      - name: Apply manual VFS hooks for non-GKI
+        run: |
+          cd kernel
+          echo "=== Manual VFS hooks ==="
+
+          # Python скрипт для точного патчинга
+          python3 << 'ENDPY'
+import re, sys, os
+
+def patch_file(path, check_str, decl, func_pattern, hook_code):
+    if not os.path.exists(path):
+        print(f"  SKIP {path} (not found)")
+        return
+    with open(path) as f:
+        src = f.read()
+    if check_str in src:
+        print(f"  ALREADY {path}")
+        return
+    # Insert extern decl before function
+    m = re.search(func_pattern, src, re.MULTILINE)
+    if not m:
+        print(f"  WARN {path}: function pattern not found")
+        return
+    src = src[:m.start()] + decl + src[m.start():]
+    # Find opening brace of function
+    m2 = re.search(func_pattern + r'[^{]*\{', src, re.MULTILINE | re.DOTALL)
+    if m2:
+        src = src[:m2.end()] + '\n' + hook_code + src[m2.end():]
+    with open(path, 'w') as f:
+        f.write(src)
+    print(f"  OK {path}")
+
+# fs/exec.c
+patch_file(
+    'fs/exec.c',
+    'ksu_handle_execveat',
+    '\n#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n\t\tvoid *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,\n\t\tvoid *argv, void *envp, int *flags);\n#endif\n',
+    r'^static int do_execveat_common\(',
+    '\t#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n\t#endif\n'
+)
+# try __do_execve_file if do_execveat_common not found
+with open('fs/exec.c') as f:
+    tmp = f.read()
+if 'ksu_handle_execveat' not in tmp:
+    patch_file(
+        'fs/exec.c',
+        'ksu_handle_execveat',
+        '\n#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n\t\tvoid *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,\n\t\tvoid *argv, void *envp, int *flags);\n#endif\n',
+        r'^static int __do_execve_file\(',
+        '\t#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n\t#endif\n'
+    )
+
+# fs/open.c
+patch_file(
+    'fs/open.c',
+    'ksu_handle_faccessat',
+    '\n#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n\t\tint *mode, int *flags);\n#endif\n',
+    r'^long do_faccessat\(',
+    '\t#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n\t#endif\n'
+)
+
+# fs/read_write.c
+patch_file(
+    'fs/read_write.c',
+    'ksu_handle_vfs_read',
+    '\n#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,\n\t\tsize_t *count_ptr, loff_t **pos);\n#endif\n',
+    r'^ssize_t vfs_read\(',
+    '\t#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n\t#endif\n'
+)
+
+# fs/stat.c
+patch_file(
+    'fs/stat.c',
+    'ksu_handle_stat',
+    '\n#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n',
+    r'SYSCALL_DEFINE4\(newfstatat,',
+    '\t#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n\t#endif\n'
+)
+
+print("=== Результат: ===")
+for f in ['fs/exec.c','fs/open.c','fs/read_write.c','fs/stat.c']:
+    if os.path.exists(f):
+        with open(f) as fp:
+            ok = 'ksu_handle' in fp.read()
+        print(f"  {'OK' if ok else 'MISS'} {f}")
+ENDPY
+
       - name: Configure kernel
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
