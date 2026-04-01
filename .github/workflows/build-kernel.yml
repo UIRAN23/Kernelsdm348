@@ -397,8 +397,7 @@ ENDPY
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
 
-          # CC передаётся отдельно — НЕ внутри MAKE_FLAGS строки
-          # (иначе будет "Unterminated quoted string" в sh)
+          
           if [ "${{ github.event.inputs.use_ccache }}" = "true" ]; then
             KERN_CC="ccache clang"
           else
