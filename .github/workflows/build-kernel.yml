@@ -167,12 +167,23 @@ jobs:
         run: |
           for F in kernel/drivers/kernelsu/*.c kernel/drivers/kernelsu/*.h; do
             [ ! -f "$F" ] && continue
-            grep -q "TWA_RESUME" "$F" && sed -i 's/TWA_RESUME/true/g' "$F" && echo "TWA_RESUME fixed: $F"
-            grep -q "TWA_SIGNAL" "$F" && sed -i 's/TWA_SIGNAL/false/g' "$F" && echo "TWA_SIGNAL fixed: $F"
+            # || true — если grep не нашёл, bash -e не упадёт
+            if grep -q "TWA_RESUME" "$F"; then
+              sed -i 's/TWA_RESUME/true/g' "$F" && echo "TWA_RESUME fixed: $F"
+            fi
+            if grep -q "TWA_SIGNAL" "$F"; then
+              sed -i 's/TWA_SIGNAL/false/g' "$F" && echo "TWA_SIGNAL fixed: $F"
+            fi
           done
           A="kernel/drivers/kernelsu/allowlist.c"
-          [ -f "$A" ] && grep -q "put_task_struct" "$A" && ! grep -q "sched/task.h" "$A" && \
-            sed -i '1s|^|#include <linux/sched/task.h>\n|' "$A" && echo "sched/task.h added"
+          if [ -f "$A" ]; then
+            if grep -q "put_task_struct" "$A" && ! grep -q "sched/task.h" "$A"; then
+              sed -i '1s|^|#include <linux/sched/task.h>\n|' "$A"
+              echo "sched/task.h added to allowlist.c"
+            else
+              echo "allowlist.c: no patch needed (put_task_struct absent or include already present)"
+            fi
+          fi
 
       # Manual VFS hooks — обязательно для non-GKI с KSU_MANUAL_HOOK=y
       # setup.sh НЕ добавляет их автоматически
