@@ -230,22 +230,10 @@ jobs:
             fi
           fi
 
-          # fs/read_write.c — ksu_handle_vfs_read
-          if grep -q "ksu_vfs_read_hook\|ksu_handle_vfs_read" fs/read_write.c 2>/dev/null; then
-            echo "  SKIP fs/read_write.c"
-          else
-            echo "  Patching fs/read_write.c..."
-            DECL="#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif"
-            HOOK="\t#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n\t#endif"
-            if grep -q "^ssize_t vfs_read(" fs/read_write.c; then
-              sed -i "s|^ssize_t vfs_read(|${DECL}\nssize_t vfs_read(|" fs/read_write.c
-              awk -v hook="$HOOK" '
-                /^ssize_t vfs_read\(/ {found=1}
-                found && /^\{/ {print; printf hook"\n"; found=0; next}
-                {print}
-              ' fs/read_write.c > fs/read_write.c.tmp && mv fs/read_write.c.tmp fs/read_write.c
-            fi
-          fi
+          # fs/read_write.c — НЕ патчим!
+          # ReSukiSU явно отвергает ksu_vfs_read_hook как incompatible hook
+          # (Kbuild:464: ksu_vfs_read_hook is incompatible hook)
+          # Этот хук остался от оригинального KernelSU, в ReSukiSU он не нужен
 
           # fs/stat.c — ksu_handle_stat
           # ВАЖНО: матчим ^SYSCALL_DEFINE4 (с начала строки),
@@ -271,7 +259,7 @@ jobs:
           fi
 
           echo "=== Результат ==="
-          for F in fs/exec.c fs/open.c fs/read_write.c fs/stat.c; do
+          for F in fs/exec.c fs/open.c fs/stat.c; do
             grep -q "ksu_handle" "$F" 2>/dev/null \
               && echo "  OK  $F" \
               || echo "  ERR $F"
