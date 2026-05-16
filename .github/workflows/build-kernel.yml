@@ -1,24 +1,12 @@
-name: Build Kernel — Mi439/Olive (ReSukiSU)
+name: Build Clean Kernel — Mi439/Olive (boot.img)
 
 on:
   workflow_dispatch:
     inputs:
-      enable_susfs:
-        description: 'Включить SUSFS? (экспериментально)'
-        required: true
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-      upload_release:
-        description: 'Создать GitHub Release?'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+      boot_img_url:
+        description: 'URL boot.img или ROM zip (оставь пустым для автоскачивания)'
+        required: false
+        default: ''
       use_ccache:
         description: 'Использовать ccache?'
         required: true
@@ -27,11 +15,14 @@ on:
         options:
           - 'true'
           - 'false'
-
-env:
-  CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
-  CCACHE_NOHASHDIR: "true"
-  CCACHE_HARDLINK: "true"
+      upload_release:
+        description: 'Создать GitHub Release?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   build:
@@ -71,8 +62,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-mi439-resukisu-${{ github.run_id }}
-          restore-keys: ccache-mi439-resukisu-
+          key: ccache-mi439-clean-${{ github.run_id }}
+          restore-keys: ccache-mi439-clean-
 
       - name: Setup ccache
         if: ${{ github.event.inputs.use_ccache == 'true' }}
@@ -80,87 +71,59 @@ jobs:
           ccache -M 5G && ccache -z
           echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
 
-      # ── Клонируем исходники по манифесту tavukkdoner ────────────
-      # local_manifests ветка a16-final
-      # kernel: tavukkdoner/kernel_msm-4.19 митка mithorium/a13/a16-ksu-ram1
-      - name: Clone kernel source
+      # ── Клонируем ядро БЕЗ KSU — ветка mithorium/a13/master ────
+      # a16-ksu-ram1 содержит KSU Next встроенный в исходники — НЕ используем
+      # master — чистое ядро без root решений
+      - name: Clone kernel source (clean, no KSU)
         run: |
           git clone --depth=1 \
-            -b mithorium/a13/a16-ksu-ram1 \
+            -b mithorium/a13/master \
             https://github.com/tavukkdoner/kernel_msm-4.19 \
             kernel
-          echo "=== Kernel cloned: mithorium/a13/a16-ksu-ram1 ==="
+          echo "=== Kernel cloned: mithorium/a13/master (no KSU) ==="
 
       - name: Clone DTS repos
         run: |
-          # DTS vendor-legacy (avc1)
-          git clone --depth=1 \
-            -b dts/avc1 \
+          git clone --depth=1 -b dts/avc1 \
             https://github.com/tavukkdoner/kernel_devicetree_msm-4.19 \
             kernel/arch/arm64/boot/dts/vendor-legacy
-          echo "dts/vendor-legacy: OK"
-
-          # DTS xiaomi-msm8937
-          git clone --depth=1 \
-            -b dts/mi8937/4.19/master \
+          git clone --depth=1 -b dts/mi8937/4.19/master \
             https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-msm8937 \
             kernel/arch/arm64/boot/dts/xiaomi-msm8937
-          echo "dts/xiaomi-msm8937: OK"
-
-          # DTS xiaomi-sdm439
-          git clone --depth=1 \
-            -b dts/mi439/4.19/master \
+          git clone --depth=1 -b dts/mi439/4.19/master \
             https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-sdm439 \
             kernel/arch/arm64/boot/dts/xiaomi-sdm439
-          echo "dts/xiaomi-sdm439: OK"
+          echo "DTS: OK"
 
       - name: Clone techpack modules
         run: |
-          # techpack/xiaomi-msm8937
-          git clone --depth=1 \
-            -b techpack/mi8937/4.19/master \
+          git clone --depth=1 -b techpack/mi8937/4.19/master \
             https://github.com/Mi-Thorium/kernel_techpack_xiaomi-msm8937 \
             kernel/techpack/xiaomi-msm8937
-          echo "techpack/xiaomi-msm8937: OK"
-
-          # techpack/xiaomi-sdm439
-          git clone --depth=1 \
-            -b techpack/mi439/4.19/master \
+          git clone --depth=1 -b techpack/mi439/4.19/master \
             https://github.com/Mi-Thorium/kernel_techpack_xiaomi-sdm439 \
             kernel/techpack/xiaomi-sdm439
-          echo "techpack/xiaomi-sdm439: OK"
-
-          # techpack/audio-legacy
-          git clone --depth=1 \
-            -b audio/4.19/mithorium/master-16 \
+          git clone --depth=1 -b audio/4.19/mithorium/master-16 \
             https://github.com/tavukkdoner/kernel_techpack_audio-legacy \
             kernel/techpack/audio-legacy
-          echo "techpack/audio-legacy: OK"
-
-          # techpack/camera-legacy
           git clone --depth=1 \
             -b camera/LA.UM.8.6.r1-05300-89xx.0/4.19/mithorium \
             https://github.com/Mi-Thorium/kernel_techpack_camera-legacy \
             kernel/techpack/camera-legacy
-          echo "techpack/camera-legacy: OK"
-
-          # techpack/camera-legacy-m
           git clone --depth=1 \
             -b camera/LA.UM.5.3-10610-89xx.0/4.19/mithorium \
             https://github.com/Mi-Thorium/kernel_techpack_camera-legacy \
             kernel/techpack/camera-legacy-m
-          echo "techpack/camera-legacy-m: OK"
+          echo "techpack: OK"
 
       - name: Clone prima WLAN driver
         run: |
-          # prima: branch master1-lto (LTO оптимизированная)
           git clone --depth=1 \
             -b wlan/LA.UM.9.6.4/mithorium/master1-lto \
             https://github.com/tavukkdoner/vendor_qcom_opensource_wlan_prima \
             kernel/drivers/staging/prima
           echo "prima: OK"
 
-      # ── Toolchain ───────────────────────────────────────────────
       - name: Download Neutron Clang
         run: |
           mkdir -p toolchain
@@ -183,165 +146,12 @@ jobs:
           echo "CLANG_BIN=$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_ENV
           "$GITHUB_WORKSPACE/toolchain/bin/clang" --version
 
-      # ── Убираем KSU Next, ставим ReSukiSU ───────────────────────
-      # Ветка a16-ksu-ram1 уже содержит KSU Next (drivers/kernelsu)
-      # Удаляем его и заменяем ReSukiSU
-      - name: Replace KSU Next with ReSukiSU
-        run: |
-          cd kernel
-          echo "=== Удаляем KSU Next ==="
-          rm -rf KernelSU drivers/kernelsu 2>/dev/null || true
-          # Убираем упоминания KSU Next из Makefile/Kconfig если есть
-          grep -rl "KernelSU-Next\|kernelsu" drivers/Makefile drivers/Kconfig 2>/dev/null \
-            | xargs sed -i '/kernelsu/d' 2>/dev/null || true
-
-          echo "=== Ставим ReSukiSU ==="
-          curl -LSs \
-            "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" \
-            | bash -s "main"
-
-          # Версия через GitHub API
-          KSU_COMMITS=$(curl -s \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/ReSukiSU/ReSukiSU/commits?sha=main&per_page=1" \
-            -I 2>/dev/null \
-            | grep -i "^link:" \
-            | grep -oP 'page=\K\d+(?=>; rel="last")' || echo "")
-          if [ -z "$KSU_COMMITS" ] && [ -d "KernelSU" ]; then
-            cd KernelSU
-            git fetch --unshallow 2>/dev/null || true
-            KSU_COMMITS=$(git rev-list --count HEAD 2>/dev/null || echo "4025")
-            cd ..
-          fi
-          [ -z "$KSU_COMMITS" ] && KSU_COMMITS="4025"
-          KSU_VERSION=$((KSU_COMMITS + 30700))
-          echo "ReSukiSU версия: v$KSU_VERSION"
-          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
-
-      # ── Патч совместимости с 4.19 ────────────────────────────────
-      - name: Patch KSU for 4.19 compatibility
-        run: |
-          for F in kernel/drivers/kernelsu/*.c kernel/drivers/kernelsu/*.h; do
-            [ ! -f "$F" ] && continue
-            if grep -q "TWA_RESUME" "$F"; then
-              sed -i 's/TWA_RESUME/true/g' "$F"
-              echo "TWA_RESUME fixed: $F"
-            fi
-            if grep -q "TWA_SIGNAL" "$F"; then
-              sed -i 's/TWA_SIGNAL/false/g' "$F"
-              echo "TWA_SIGNAL fixed: $F"
-            fi
-          done
-          A="kernel/drivers/kernelsu/allowlist.c"
-          if [ -f "$A" ]; then
-            if grep -q "put_task_struct" "$A" && ! grep -q "sched/task.h" "$A"; then
-              sed -i '1s|^|#include <linux/sched/task.h>\n|' "$A"
-              echo "sched/task.h added"
-            fi
-          fi
-
-      # ── Manual VFS hooks для Non-GKI 4.19 ───────────────────────
-      # Требуются ReSukiSU с KSU_MANUAL_HOOK=y
-      # НЕ патчим fs/read_write.c — ksu_vfs_read_hook несовместим с ReSukiSU
-      - name: Apply manual VFS hooks
-        run: |
-          cd kernel
-          echo "=== Manual VFS hooks ==="
-
-          # fs/exec.c — ksu_handle_execveat
-          if grep -q "ksu_handle_execveat" fs/exec.c 2>/dev/null; then
-            echo "  SKIP fs/exec.c"
-          else
-            echo "  Patching fs/exec.c..."
-            DECL="#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif"
-            HOOK="\t#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n\t#endif"
-            for FUNC in "do_execveat_common" "__do_execve_file"; do
-              if grep -q "^static int ${FUNC}(" fs/exec.c; then
-                sed -i "s|^static int ${FUNC}(|${DECL}\nstatic int ${FUNC}(|" fs/exec.c
-                awk -v func="$FUNC" -v hook="$HOOK" '
-                  $0 ~ "^static int "func"(" {found=1}
-                  found && /^\{/ {print; printf hook"\n"; found=0; next}
-                  {print}
-                ' fs/exec.c > fs/exec.c.tmp && mv fs/exec.c.tmp fs/exec.c
-                break
-              fi
-            done
-          fi
-
-          # fs/open.c — ksu_handle_faccessat
-          if grep -q "ksu_handle_faccessat" fs/open.c 2>/dev/null; then
-            echo "  SKIP fs/open.c"
-          else
-            echo "  Patching fs/open.c..."
-            DECL="#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif"
-            HOOK="\t#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n\t#endif"
-            if grep -q "^long do_faccessat(" fs/open.c; then
-              sed -i "s|^long do_faccessat(|${DECL}\nlong do_faccessat(|" fs/open.c
-              awk -v hook="$HOOK" '
-                /^long do_faccessat\(/ {found=1}
-                found && /^\{/ {print; printf hook"\n"; found=0; next}
-                {print}
-              ' fs/open.c > fs/open.c.tmp && mv fs/open.c.tmp fs/open.c
-            fi
-          fi
-
-          # fs/stat.c — ksu_handle_stat (только ^SYSCALL_DEFINE4, не COMPAT_)
-          if grep -q "ksu_handle_stat" fs/stat.c 2>/dev/null; then
-            echo "  SKIP fs/stat.c"
-          else
-            echo "  Patching fs/stat.c..."
-            DECL="#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif"
-            HOOK="\t#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n\t#endif"
-            if grep -q "^SYSCALL_DEFINE4(newfstatat," fs/stat.c; then
-              sed -i "/^SYSCALL_DEFINE4(newfstatat,/i ${DECL}" fs/stat.c
-              awk -v hook="$HOOK" '
-                /^SYSCALL_DEFINE4\(newfstatat,/ {found=1}
-                found && /^\{/ {print; printf hook"\n"; found=0; next}
-                {print}
-              ' fs/stat.c > fs/stat.c.tmp && mv fs/stat.c.tmp fs/stat.c
-            fi
-          fi
-
-          echo "=== Результат ==="
-          for F in fs/exec.c fs/open.c fs/stat.c; do
-            grep -q "ksu_handle" "$F" 2>/dev/null \
-              && echo "  OK  $F" || echo "  ERR $F"
-          done
-
-      # ── SUSFS (опционально) ─────────────────────────────────────
-      - name: Apply SUSFS patches
-        run: |
-          if [ "${{ github.event.inputs.enable_susfs }}" != "true" ]; then
-            echo "SUSFS выключен."
-            echo "SUSFS_APPLIED=false" >> $GITHUB_ENV
-            exit 0
-          fi
-          git clone --depth=1 \
-            https://github.com/KernelSU-Next/kernel_patches ksu_patches
-          echo "Патчи:"; find ksu_patches -name "*.patch" | sort
-          cd kernel; SUSFS_APPLIED=false
-          for C in \
-            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel-4.19.patch" \
-            "$GITHUB_WORKSPACE/ksu_patches/50_add_susfs_in_kernel-4.19.patch" \
-            "$GITHUB_WORKSPACE/ksu_patches/next/50_add_susfs_in_kernel.patch"; do
-            [ ! -f "$C" ] && continue
-            patch -p1 --dry-run --no-backup-if-mismatch < "$C" > /dev/null 2>&1 || continue
-            patch -p1 --no-backup-if-mismatch < "$C" && SUSFS_APPLIED=true && echo "SUSFS OK" && break
-          done
-          echo "SUSFS_APPLIED=$SUSFS_APPLIED" >> $GITHUB_ENV
-
-      # ── Конфигурация ────────────────────────────────────────────
-      # Mi-Thorium стиль: vendor/sdm439-perf_defconfig + фрагменты
       - name: Configure kernel
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
-
-          if [ "${{ github.event.inputs.use_ccache }}" = "true" ]; then
-            KERN_CC="ccache clang"
-          else
-            KERN_CC="clang"
-          fi
+          [ "${{ github.event.inputs.use_ccache }}" = "true" ] && \
+            KERN_CC="ccache clang" || KERN_CC="clang"
 
           MAKE_FLAGS="O=out ARCH=arm64 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -349,74 +159,48 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             LLVM=1 LLVM_IAS=1"
 
-          # Mi-Thorium дефконфиг для SDM439
+          # Ищем дефконфиг
           BASE=""
-          for C in \
-            vendor/sdm439-perf_defconfig \
-            vendor/msm8937-perf_defconfig \
-            vendor/msm8937_defconfig; do
-            if [ -f "arch/arm64/configs/$C" ]; then
-              BASE="$C"; echo "defconfig: $BASE"; break
-            fi
+          for C in vendor/sdm439-perf_defconfig vendor/msm8937-perf_defconfig; do
+            [ -f "arch/arm64/configs/$C" ] && BASE="$C" && break
           done
           [ -z "$BASE" ] && echo "ERROR: defconfig не найден!" && \
             find arch/arm64/configs -maxdepth 3 | sort && exit 1
+          echo "defconfig: $BASE"
 
           make $MAKE_FLAGS CC="$KERN_CC" $BASE
 
-          # Mi-Thorium фрагменты конфига
+          # Мерджим Mi-Thorium фрагменты
           FRAGMENTS=""
-          for FRAG in \
+          for F in \
             arch/arm64/configs/vendor/common.config \
             arch/arm64/configs/vendor/feature/android-12.config \
             arch/arm64/configs/vendor/feature/exfat.config \
             arch/arm64/configs/vendor/feature/kprobes.config \
             arch/arm64/configs/vendor/feature/lmkd.config; do
-            [ -f "$FRAG" ] && FRAGMENTS="$FRAGMENTS $FRAG"
+            [ -f "$F" ] && FRAGMENTS="$FRAGMENTS $F"
           done
           if [ -n "$FRAGMENTS" ]; then
-            echo "Мерджим фрагменты:$FRAGMENTS"
             KCONFIG_CONFIG=out/.config \
               ./scripts/kconfig/merge_config.sh -m out/.config $FRAGMENTS
             [ -f .config ] && mv .config out/.config
-            make $MAKE_FLAGS CC="$KERN_CC" olddefconfig
           fi
 
-          # ReSukiSU — Manual hooks (KSU_MANUAL_HOOK=y, без TP hooks)
-          scripts/config --file out/.config \
-            -e KSU \
-            -e KSU_MANUAL_HOOK \
-            -d KSU_WITH_KPROBES \
-            -e KPROBES \
-            -e HAVE_KPROBES \
-            -e KPROBE_EVENTS
-
-          # SUSFS
-          if [ "${{ env.SUSFS_APPLIED }}" = "true" ]; then
-            scripts/config --file out/.config \
-              -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
-              -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_TRY_UMOUNT \
-              -e KSU_SUSFS_SPOOFE_UNAME -e KSU_SUSFS_ENABLE_LOG
-          else
-            scripts/config --file out/.config -d KSU_SUSFS 2>/dev/null || true
-          fi
+          # Отключаем KSU явно (чистое ядро)
+          scripts/config --file out/.config -d KSU 2>/dev/null || true
 
           make $MAKE_FLAGS CC="$KERN_CC" olddefconfig
-
-          echo "=== CONFIG CHECK ==="
-          grep -E "^CONFIG_KSU" out/.config || true
+          echo "=== CONFIG KSU ==="
+          grep "CONFIG_KSU" out/.config || echo "KSU: не включён (OK)"
           echo "Configuration done."
 
-      # ── Сборка ──────────────────────────────────────────────────
       - name: Build kernel
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           cd kernel
-          if [ "${{ github.event.inputs.use_ccache }}" = "true" ]; then
-            KERN_CC="ccache clang"
-          else
-            KERN_CC="clang"
-          fi
+          [ "${{ github.event.inputs.use_ccache }}" = "true" ] && \
+            KERN_CC="ccache clang" || KERN_CC="clang"
+
           BUILD_START=$(date +"%s")
           set +e
           make -j$(nproc --all) \
@@ -431,7 +215,7 @@ jobs:
           set -e
           DIFF=$(( $(date +"%s") - BUILD_START ))
           echo "Время: $((DIFF/60))m $((DIFF%60))s"
-          [ "${{ github.event.inputs.use_ccache }}" = "true" ] && ccache -s
+          [ "${{ github.event.inputs.use_ccache }}" = "true" ] && ccache -s || true
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "════ ОШИБКИ ════"
             grep -n " error:" build.log | grep -v "^Binary" | head -50 || true
@@ -440,66 +224,134 @@ jobs:
             exit 1
           fi
           ls -lh out/arch/arm64/boot/Image.gz-dtb
-          echo "OK"
+          echo "Kernel: OK"
 
-      # ── APK менеджера ────────────────────────────────────────────
-      - name: Download ReSukiSU Manager APK
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ── Собираем boot.img через magiskboot ──────────────────────
+      # Скачиваем оригинальный boot.img из ROM tavukkdoner,
+      # заменяем в нём ядро на свежесобранное
+      - name: Build boot.img with magiskboot
         run: |
-          mkdir -p apk_out
-          echo "Скачиваем ReSukiSU Manager..."
-          # ReSukiSU не публикует Releases — только CI артефакты
-          run_id=$(curl -s \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/ReSukiSU/ReSukiSU/actions/workflows/build-manager.yml/runs?branch=main&status=success&per_page=1" \
+          mkdir -p boot_work
+
+          # ── Шаг 1: скачиваем magiskboot ─────────────────────────
+          echo "Скачиваем magiskboot..."
+          MAGISK_URL=$(curl -s \
+            "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" \
             | python3 -c "
           import sys,json; d=json.load(sys.stdin)
-          runs=d.get('workflow_runs',[])
-          print(runs[0]['id'] if runs else '')" 2>/dev/null || echo "")
-          if [ -n "$run_id" ]; then
-            artifact_url=$(curl -s \
-              -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/ReSukiSU/ReSukiSU/actions/runs/$run_id/artifacts" \
+          for a in d.get('assets',[]):
+              u=a.get('browser_download_url','')
+              if u.endswith('.apk') and 'Magisk-v' in u:
+                  print(u); break")
+          wget -q "$MAGISK_URL" -O magisk.zip
+          unzip -j magisk.zip "lib/x86_64/libmagiskboot.so" -d boot_work/ 2>/dev/null || \
+          unzip -j magisk.zip "lib/x86/libmagiskboot.so" -d boot_work/ 2>/dev/null || true
+          # Ищем в других путях
+          if [ ! -f boot_work/libmagiskboot.so ]; then
+            unzip -l magisk.zip | grep magiskboot || true
+            unzip magisk.zip -d magisk_extracted/
+            find magisk_extracted -name "*magiskboot*" | head -5
+            find magisk_extracted -name "libmagiskboot.so" | head -1 | \
+              xargs -I{} cp {} boot_work/libmagiskboot.so
+          fi
+          mv boot_work/libmagiskboot.so boot_work/magiskboot
+          chmod +x boot_work/magiskboot
+          echo "magiskboot: OK"
+
+          # ── Шаг 2: скачиваем оригинальный boot.img ──────────────
+          CUSTOM_URL="${{ github.event.inputs.boot_img_url }}"
+          if [ -n "$CUSTOM_URL" ]; then
+            echo "Скачиваем boot.img с: $CUSTOM_URL"
+            wget -q --show-progress "$CUSTOM_URL" -O boot_work/rom.zip
+          else
+            # Скачиваем последний ROM tavukkdoner
+            echo "Скачиваем ROM tavukkdoner (последний релиз)..."
+            ROM_URL=$(curl -s \
+              "https://api.github.com/repos/tavukkdoner/rom/releases/latest" \
               | python3 -c "
           import sys,json; d=json.load(sys.stdin)
-          for a in d.get('artifacts',[]):
-              n=a.get('name','')
-              if 'Manager' in n or 'manager' in n.lower():
-                  print(a['archive_download_url']); break" 2>/dev/null || echo "")
-            if [ -n "$artifact_url" ]; then
-              curl -fL -H "Authorization: token $GITHUB_TOKEN" \
-                -o apk_out/manager.zip "$artifact_url"
-              unzip -j apk_out/manager.zip "*arm64*.apk" -d apk_out/ 2>/dev/null || \
-              unzip -j apk_out/manager.zip "*.apk" -d apk_out/ 2>/dev/null || true
-              rm -f apk_out/manager.zip
+          assets=d.get('assets',[])
+          # Ищем zip с Mi439
+          for a in assets:
+              u=a.get('browser_download_url','')
+              if 'Mi439' in u and u.endswith('.zip'):
+                  print(u); break
+          if not assets:
+              print('')" 2>/dev/null || echo "")
+
+            if [ -n "$ROM_URL" ]; then
+              echo "ROM URL: $ROM_URL"
+              wget -q --show-progress "$ROM_URL" -O boot_work/rom.zip
+            else
+              # Фолбэк — хардкод последней известной версии
+              echo "API не нашёл, используем известный URL..."
+              wget -q --show-progress \
+                "https://github.com/tavukkdoner/rom/releases/download/v154.1/EvolutionX-16.0-20260315-Mi439_4_19-11.6.2-Unofficial.zip" \
+                -O boot_work/rom.zip
             fi
           fi
-          ls -lh apk_out/*.apk 2>/dev/null || echo "(APK не найден — скачай вручную с nightly.link)"
 
-      # ── AnyKernel3 ──────────────────────────────────────────────
-      - name: Package with AnyKernel3
+          # Извлекаем boot.img из ROM zip
+          echo "Извлекаем boot.img..."
+          unzip -j boot_work/rom.zip "boot.img" -d boot_work/ || \
+          unzip -j boot_work/rom.zip "*/boot.img" -d boot_work/ || true
+
+          if [ ! -f boot_work/boot.img ]; then
+            echo "boot.img не найден в zip, список файлов:"
+            unzip -l boot_work/rom.zip | head -30
+            exit 1
+          fi
+          echo "boot.img: $(ls -lh boot_work/boot.img)"
+          rm -f boot_work/rom.zip
+
+          # ── Шаг 3: распаковываем boot.img ───────────────────────
+          cd boot_work
+          ./magiskboot unpack boot.img
+          echo "=== Содержимое boot.img: ==="
+          ls -lh
+          echo "kernel: $(ls -lh kernel 2>/dev/null || echo 'не найден')"
+
+          # ── Шаг 4: заменяем ядро ────────────────────────────────
+          cp "$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.gz-dtb" kernel
+          echo "Ядро заменено."
+
+          # ── Шаг 5: собираем новый boot.img ──────────────────────
+          ./magiskboot repack boot.img
+          ls -lh new-boot.img
+          cp new-boot.img "$GITHUB_WORKSPACE/clean_boot.img"
+          cd "$GITHUB_WORKSPACE"
+          echo "boot.img готов: $(ls -lh clean_boot.img)"
+
+      - name: Package outputs
         run: |
+          DATE=$(date +%Y%m%d)
+
+          # boot.img — для прямой прошивки через fastboot или FolkPatch/APatch
+          cp clean_boot.img "clean_boot_Mi439_${DATE}.img"
+
+          # Также делаем AnyKernel3 zip — для прошивки через TWRP
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AK3
           cp anykernel3/anykernel.sh AK3/anykernel.sh
           cp kernel/out/arch/arm64/boot/Image.gz-dtb AK3/
-          for APK in apk_out/*.apk; do
-            [ -f "$APK" ] && cp "$APK" AK3/ && echo "APK добавлен: $(basename $APK)"
-          done
-          DATE=$(date +%Y%m%d)
-          SUSFS_TAG=""
-          [ "${{ env.SUSFS_APPLIED }}" = "true" ] && SUSFS_TAG="-SUSFS"
-          ZIP="AnyKernel3_ReSukiSU_v${{ env.KSU_VERSION }}${SUSFS_TAG}_Mi439_${DATE}.zip"
+          ZIP="AnyKernel3_CleanKernel_Mi439_${DATE}.zip"
           cd AK3 && zip -r9 "$GITHUB_WORKSPACE/$ZIP" . -x '*.git*' && cd ..
-          echo "ZIP_NAME=$ZIP" >> $GITHUB_ENV
-          echo "ZIP: $ZIP"
-          ls -lh "$ZIP"
 
-      - name: Upload artifact
+          echo "BOOT_IMG=clean_boot_Mi439_${DATE}.img" >> $GITHUB_ENV
+          echo "ZIP_NAME=$ZIP" >> $GITHUB_ENV
+          echo "DATE=$DATE" >> $GITHUB_ENV
+          ls -lh clean_boot_Mi439_${DATE}.img "$ZIP"
+
+      - name: Upload boot.img artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3_ReSukiSU_v${{ env.KSU_VERSION }}_Mi439
+          name: clean_boot_Mi439_${{ env.DATE }}
+          path: ${{ env.BOOT_IMG }}
+          retention-days: 30
+
+      - name: Upload AnyKernel3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3_CleanKernel_Mi439_${{ env.DATE }}
           path: ${{ env.ZIP_NAME }}
           retention-days: 30
 
@@ -508,19 +360,32 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: "Mi439 — ReSukiSU v${{ env.KSU_VERSION }} #${{ github.run_number }}"
+          name: "Mi439 Clean Kernel — boot.img + AnyKernel3 #${{ github.run_number }}"
           body: |
-            ## Redmi 8 / 8A / 8A Dual (olive / mi439)
+            ## Чистое ядро для Redmi 8 / 8A / 8A Dual (olive / mi439)
+
+            **Без KSU/Magisk/APatch** — готово для FolkPatch или APatch
 
             | | |
             |---|---|
-            | Ядро | `tavukkdoner/kernel_msm-4.19` `mithorium/a13/a16-ksu-ram1` |
-            | KSU | ReSukiSU `v${{ env.KSU_VERSION }}` |
-            | Hook | Manual VFS (non-GKI) |
-            | SUSFS | ${{ env.SUSFS_APPLIED == 'true' && '✅' || '❌' }} |
-            | ROM | EvolutionX 16.0 |
+            | Ядро | `tavukkdoner/kernel_msm-4.19` `mithorium/a13/master` |
+            | KSU | ❌ не встроен |
+            | Root | устанавливается отдельно (FolkPatch / APatch) |
 
-            ### Установка
-            1. Прошей ZIP через TWRP
-            2. Установи APK менеджера (внутри ZIP или [nightly.link](https://nightly.link/ReSukiSU/ReSukiSU/workflows/build-manager/main/Manager-release.zip))
-          files: ${{ env.ZIP_NAME }}
+            ### Способы установки
+
+            **Через fastboot (рекомендуется для FolkPatch):**
+            ```
+            fastboot flash boot clean_boot_Mi439_*.img
+            ```
+
+            **Через TWRP:**
+            Прошей AnyKernel3 zip
+
+            ### После установки — FolkPatch:
+            1. Установи FolkPatch APK
+            2. Запусти → он запатчит boot.img с APatch
+            3. Прошей патченный boot.img через fastboot
+          files: |
+            ${{ env.BOOT_IMG }}
+            ${{ env.ZIP_NAME }}
